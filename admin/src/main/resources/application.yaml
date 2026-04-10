@@ -1,0 +1,110 @@
+server:
+  port: ${SERVER_PORT:8002}
+
+spring:
+  application:
+    name: xunzhi-agent-admin
+  profiles:
+    include: satoken,sse
+  servlet:
+    multipart:
+      location: ${XUNZHI_MULTIPART_TEMP_DIR:${xunzhi-agent.storage.upload-temp-dir}}
+      max-file-size: 100MB
+      max-request-size: 100MB
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:mainshi_agent}?useUnicode=true&characterEncoding=UTF-8&rewriteBatchedStatements=true&allowMultiQueries=true&serverTimezone=${APP_TIMEZONE:Asia/Shanghai}
+    username: ${MYSQL_USERNAME:root}
+    password: ${MYSQL_PASSWORD:123456}
+  data:
+    mongodb:
+      host: ${MONGODB_HOST:127.0.0.1}
+      port: ${MONGODB_PORT:27017}
+      database: ${MONGODB_DATABASE:xunzhi_agent}
+      # username: ${MONGODB_USERNAME:}
+      # password: ${MONGODB_PASSWORD:}
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 8
+          min-idle: 0
+        shutdown-timeout: 100ms
+      timeout: 10000ms
+  task:
+    scheduling:
+      pool:
+        size: 2
+      thread-name-prefix: redis-session-task-
+    execution:
+      pool:
+        core-size: 4
+        max-size: 8
+        queue-capacity: 100
+        thread-name-prefix: redis-session-async-
+  ai:
+    openai:
+      api-key: ${SPRING_AI_OPENAI_API_KEY:sk-db221a65d3aa42d99453d1d9bb2ef8c3}
+      base-url: ${SPRING_AI_OPENAI_BASE_URL:https://api.openai.com}
+      chat:
+        options:
+          model: ${SPRING_AI_OPENAI_MODEL:gpt-4o-mini}
+          temperature: ${SPRING_AI_OPENAI_TEMPERATURE:0.7}
+      embedding:
+        options:
+          model: ${SPRING_AI_OPENAI_EMBEDDING_MODEL:text-embedding-3-small}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  health:
+    defaults:
+      enabled: true
+
+logging:
+  file:
+    path: ${XUNZHI_LOG_DIR:${xunzhi-agent.storage.log-dir}}
+
+collection:
+  vector:
+    similarity-threshold: 0.9
+
+xunfei:
+  lat-key:
+    app-id: ${XUNFEI_APP_ID:96f3a359}
+    api-key: ${XUNFEI_API_KEY:e8565c438f59b301616e0498a86ad95d}
+    api-secret: ${XUNFEI_API_SECRET:OGZkZGQ5ZDY0Yzc4MTllZWI3ZmU2MDU4}
+    rta-api-key: ${XUNFEI_RTA_API_KEY:}
+
+xunzhi-agent:
+  storage:
+    base-dir: ${XUNZHI_STORAGE_BASE_DIR:${user.home}/.xunzhi-agent}
+    upload-temp-dir: ${XUNZHI_MULTIPART_TEMP_DIR:${xunzhi-agent.storage.base-dir}/temp/upload}
+    audio-temp-dir: ${XUNZHI_AUDIO_TEMP_DIR:${xunzhi-agent.storage.base-dir}/temp/audio}
+    log-dir: ${XUNZHI_LOG_DIR:${xunzhi-agent.storage.base-dir}/logs}
+  agent-binding:
+    general-agent-chat: ${XUNZHI_AGENT_GENERAL_CHAT:\u901a\u7528\u667a\u80fd\u4f53}
+    interview-question-extraction: ${XUNZHI_AGENT_INTERVIEW_QUESTION_EXTRACTION:\u9762\u8bd5\u51fa\u9898\u5b98}
+    interview-answer-evaluation: ${XUNZHI_AGENT_INTERVIEW_ANSWER_EVALUATION:\u7528\u6237\u7b54\u6848\u8bc4\u5206\u5b98}
+    interview-demeanor: ${XUNZHI_AGENT_INTERVIEW_DEMEANOR:\u795e\u6001\u5206\u6790\u5b98}
+    interview-question-asking: ${XUNZHI_AGENT_INTERVIEW_QUESTION_ASKING:\u9762\u8bd5\u63d0\u95ee\u5b98}
+  flow-limit:
+    enable: true
+    time-window-seconds: 1
+    max-access-count: 20
+  redis-session:
+    enable: true
+    message-expire-seconds: 604800
+    sync-delay-seconds: 30
+    batch-sync-size: 100
+    max-queue-size: 10000
+    clean-interval-seconds: 300

@@ -1,0 +1,717 @@
+package com.hewei.hzyjy.xunzhi.interview.service.impl;
+
+import cn.hutool.core.util.StrUtil;
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.TypeReference;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.hewei.hzyjy.xunzhi.common.convention.exception.ClientException;
+import com.hewei.hzyjy.xunzhi.common.enums.InterviewErrorCodeEnum;
+import com.hewei.hzyjy.xunzhi.interview.application.InterviewSessionOwnershipService;
+import com.hewei.hzyjy.xunzhi.interview.api.io.req.InterviewRecordPageReqDTO;
+import com.hewei.hzyjy.xunzhi.interview.api.io.req.InterviewRecordSaveReqDTO;
+import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewPlaybackItemRespDTO;
+import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewRecordRespDTO;
+import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewReviewFeedbackRespDTO;
+import com.hewei.hzyjy.xunzhi.interview.api.io.resp.RadarChartDTO;
+import com.hewei.hzyjy.xunzhi.interview.api.io.resp.RadarDimensionItemRespDTO;
+import com.hewei.hzyjy.xunzhi.interview.dao.entity.InterviewSession;
+import com.hewei.hzyjy.xunzhi.interview.dao.entity.InterviewRecordDO;
+import com.hewei.hzyjy.xunzhi.interview.dao.mapper.InterviewRecordMapper;
+import com.hewei.hzyjy.xunzhi.interview.service.InterviewQuestionCacheService;
+import com.hewei.hzyjy.xunzhi.interview.service.InterviewRecordService;
+import com.hewei.hzyjy.xunzhi.interview.service.InterviewSessionService;
+import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewSessionStatus;
+import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewTurnLog;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.BeanUtils;
+import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+/**
+ * Interview record service implementation.
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMapper, InterviewRecordDO> implements InterviewRecordService {
+
+    private final InterviewQuestionCacheService interviewQuestionCacheService;
+    private final InterviewSessionOwnershipService interviewSessionOwnershipService;
+    private final InterviewSessionService interviewSessionService;
+
+    @Override
+    public void saveInterviewRecord(String sessionId, Long userId, InterviewRecordSaveReqDTO requestParam) {
+        if (StrUtil.isBlank(sessionId)) {
+            throw new ClientException(InterviewErrorCodeEnum.SESSION_ID_EMPTY);
+        }
+        validateUserId(userId);
+
+        InterviewRecordSaveReqDTO safeRequest = requestParam == null ? new InterviewRecordSaveReqDTO() : requestParam;
+        InterviewSession session = interviewSessionOwnershipService.requireOwnedSession(sessionId, userId);
+
+        Integer totalScore = resolveInterviewScore(sessionId, safeRequest);
+        String suggestions = resolveInterviewSuggestions(sessionId, safeRequest);
+        Integer resumeScore = interviewQuestionCacheService.getSessionResumeScore(sessionId);
+        Map<String, String> interviewQuestions = interviewQuestionCacheService.getSessionInterviewQuestions(sessionId);
+        Integer questionCount = interviewQuestions == null ? 0 : interviewQuestions.size();
+        String interviewDirection = StrUtil.isNotBlank(safeRequest.getInterviewDirection())
+                ? safeRequest.getInterviewDirection()
+                : interviewQuestionCacheService.getSessionInterviewDirection(sessionId);
+
+        LambdaQueryWrapper<InterviewRecordDO> queryWrapper = Wrappers.lambdaQuery(InterviewRecordDO.class)
+                .eq(InterviewRecordDO::getUserId, userId)
+                .eq(InterviewRecordDO::getSessionId, sessionId)
+                .eq(InterviewRecordDO::getDelFlag, 0);
+        InterviewRecordDO record = baseMapper.selectOne(queryWrapper);
+
+        Date now = new Date();
+        if (record == null) {
+            record = new InterviewRecordDO();
+            record.setUserId(userId);
+            record.setSessionId(sessionId);
+            record.setCreateTime(now);
+            record.setDelFlag(0);
+        }
+
+        Date sessionStartTime = session.getStartTime() != null
+                ? session.getStartTime()
+                : (session.getCreateTime() != null ? session.getCreateTime() : now);
+        Date startTime = record.getStartTime() != null ? record.getStartTime() : sessionStartTime;
+        Integer durationSeconds = calculateDurationSeconds(startTime, now);
+        String status = resolveInterviewStatus(session.getStatus(), totalScore);
+        String snapshotJson = buildSessionSnapshotJson(
+                session,
+                resumeScore,
+                totalScore,
+                questionCount,
+                interviewDirection,
+                status,
+                suggestions
+        );
+
+        record.setInterviewScore(totalScore);
+        record.setResumeScore(resumeScore);
+        record.setInterviewStatus(status);
+        record.setQuestionCount(questionCount);
+        record.setInterviewerAgentId(session.getInterviewerAgentId());
+        record.setInterviewSuggestions(suggestions);
+        if (StrUtil.isNotBlank(interviewDirection)) {
+            record.setInterviewDirection(interviewDirection);
+        }
+        record.setStartTime(startTime);
+        record.setEndTime(now);
+        record.setDurationSeconds(durationSeconds);
+        record.setSessionSnapshotJson(snapshotJson);
+        record.setUpdateTime(now);
+
+        if (record.getId() == null) {
+            baseMapper.insert(record);
+            log.info("Created interview record, userId={}, sessionId={}", userId, sessionId);
+        } else {
+            baseMapper.updateById(record);
+            log.info("Updated interview record, userId={}, sessionId={}", userId, sessionId);
+        }
+    }
+
+    @Override
+    public IPage<InterviewRecordRespDTO> pageInterviewRecords(Long userId, InterviewRecordPageReqDTO requestParam) {
+        validateUserId(userId);
+
+        Page<InterviewRecordDO> page = new Page<>(requestParam.getPageNum(), requestParam.getPageSize());
+        LambdaQueryWrapper<InterviewRecordDO> queryWrapper = Wrappers.lambdaQuery(InterviewRecordDO.class)
+                .eq(InterviewRecordDO::getUserId, userId)
+                .eq(InterviewRecordDO::getDelFlag, 0);
+
+        if (StringUtils.hasText(requestParam.getSessionId())) {
+            queryWrapper.eq(InterviewRecordDO::getSessionId, requestParam.getSessionId());
+        }
+        if (requestParam.getMinScore() != null) {
+            queryWrapper.ge(InterviewRecordDO::getInterviewScore, requestParam.getMinScore());
+        }
+        if (requestParam.getMaxScore() != null) {
+            queryWrapper.le(InterviewRecordDO::getInterviewScore, requestParam.getMaxScore());
+        }
+        if (StringUtils.hasText(requestParam.getInterviewDirection())) {
+            queryWrapper.eq(InterviewRecordDO::getInterviewDirection, requestParam.getInterviewDirection());
+        }
+        queryWrapper.orderByDesc(InterviewRecordDO::getCreateTime);
+
+        Page<InterviewRecordDO> recordPage = baseMapper.selectPage(page, queryWrapper);
+        List<InterviewRecordRespDTO> resultList = recordPage.getRecords().stream()
+                .map(record -> {
+                    InterviewRecordRespDTO respDTO = new InterviewRecordRespDTO();
+                    BeanUtils.copyProperties(record, respDTO);
+                    if (StrUtil.isNotBlank(record.getInterviewSuggestions())) {
+                        respDTO.setInterviewSuggestionsMap(parseInterviewSuggestions(record.getInterviewSuggestions()));
+                    }
+                    return respDTO;
+                })
+                .collect(Collectors.toList());
+
+        Page<InterviewRecordRespDTO> resultPage = new Page<>(recordPage.getCurrent(), recordPage.getSize(), recordPage.getTotal());
+        resultPage.setRecords(resultList);
+        return resultPage;
+    }
+
+    @Override
+    public InterviewRecordRespDTO getBySessionId(String sessionId, Long userId) {
+        if (StrUtil.isBlank(sessionId)) {
+            throw new ClientException(InterviewErrorCodeEnum.SESSION_ID_EMPTY);
+        }
+        validateUserId(userId);
+
+        LambdaQueryWrapper<InterviewRecordDO> queryWrapper = Wrappers.lambdaQuery(InterviewRecordDO.class)
+                .eq(InterviewRecordDO::getUserId, userId)
+                .eq(InterviewRecordDO::getSessionId, sessionId)
+                .eq(InterviewRecordDO::getDelFlag, 0);
+        InterviewRecordDO record = baseMapper.selectOne(queryWrapper);
+        if (record == null) {
+            // 首次打开报告页时，自动尝试从缓存生成一次记录。
+            try {
+                saveInterviewRecord(sessionId, userId, new InterviewRecordSaveReqDTO());
+                record = baseMapper.selectOne(queryWrapper);
+            } catch (Exception ex) {
+                log.warn("Auto-create interview record failed, sessionId={}, userId={}", sessionId, userId, ex);
+            }
+        }
+        if (record == null) {
+            return null;
+        }
+
+        InterviewRecordRespDTO respDTO = new InterviewRecordRespDTO();
+        BeanUtils.copyProperties(record, respDTO);
+        if (StrUtil.isNotBlank(record.getInterviewSuggestions())) {
+            respDTO.setInterviewSuggestionsMap(parseInterviewSuggestions(record.getInterviewSuggestions()));
+        }
+        enrichReportFields(sessionId, record, respDTO);
+        return respDTO;
+    }
+
+    @Override
+    public void saveInterviewRecordFromRedis(String sessionId, Long userId) {
+        if (StrUtil.isBlank(sessionId)) {
+            throw new ClientException(InterviewErrorCodeEnum.SESSION_ID_EMPTY);
+        }
+        validateUserId(userId);
+
+        interviewSessionService.finishSession(sessionId, userId);
+        saveInterviewRecord(sessionId, userId, new InterviewRecordSaveReqDTO());
+        log.info("Saved interview record from redis, sessionId={}, userId={}", sessionId, userId);
+    }
+
+    private void validateUserId(Long userId) {
+        if (userId == null || userId <= 0) {
+            throw new ClientException(InterviewErrorCodeEnum.INVALID_USER_ID);
+        }
+    }
+
+    private Integer resolveInterviewScore(String sessionId, InterviewRecordSaveReqDTO requestParam) {
+        if (requestParam.getInterviewScore() != null) {
+            return requestParam.getInterviewScore();
+        }
+        Integer score = interviewQuestionCacheService.getSessionTotalScore(sessionId);
+        return score != null ? score : 0;
+    }
+
+    private String resolveInterviewSuggestions(String sessionId, InterviewRecordSaveReqDTO requestParam) {
+        if (StrUtil.isNotBlank(requestParam.getInterviewSuggestions())) {
+            return requestParam.getInterviewSuggestions();
+        }
+        Map<String, String> suggestionsMap = interviewQuestionCacheService.getSessionInterviewSuggestions(sessionId);
+        if (suggestionsMap == null || suggestionsMap.isEmpty()) {
+            return null;
+        }
+        return suggestionsMap.entrySet().stream()
+                .sorted((e1, e2) -> {
+                    try {
+                        return Integer.compare(Integer.parseInt(e1.getKey()), Integer.parseInt(e2.getKey()));
+                    } catch (NumberFormatException ex) {
+                        return e1.getKey().compareTo(e2.getKey());
+                    }
+                })
+                .map(Map.Entry::getValue)
+                .collect(Collectors.joining("; "));
+    }
+
+    private String resolveInterviewStatus(String sessionStatus, Integer totalScore) {
+        if (StrUtil.isBlank(sessionStatus)) {
+            return totalScore != null && totalScore > 0
+                    ? InterviewSessionStatus.FINISHED.name()
+                    : InterviewSessionStatus.DRAFT.name();
+        }
+        try {
+            InterviewSessionStatus status = InterviewSessionStatus.valueOf(sessionStatus);
+            if (status == InterviewSessionStatus.FINISHED && totalScore != null && totalScore > 0) {
+                return InterviewSessionStatus.FINISHED.name();
+            }
+            return status.name();
+        } catch (IllegalArgumentException ex) {
+            log.warn("Unknown interview session status: {}", sessionStatus);
+            return sessionStatus;
+        }
+    }
+
+    private Integer calculateDurationSeconds(Date startTime, Date endTime) {
+        if (startTime == null || endTime == null) {
+            return null;
+        }
+        long durationMs = endTime.getTime() - startTime.getTime();
+        if (durationMs <= 0) {
+            return 0;
+        }
+        return (int) (durationMs / 1000);
+    }
+
+    private String buildSessionSnapshotJson(
+            InterviewSession session,
+            Integer resumeScore,
+            Integer interviewScore,
+            Integer questionCount,
+            String interviewDirection,
+            String interviewStatus,
+            String interviewSuggestions) {
+        List<InterviewTurnLog> turns = interviewQuestionCacheService.getInterviewTurns(session.getSessionId());
+        RadarChartDTO radarChart = interviewQuestionCacheService.getRadarChartData(session.getSessionId());
+
+        Map<String, Object> snapshot = new LinkedHashMap<>();
+        snapshot.put("sessionId", session.getSessionId());
+        snapshot.put("sessionStatus", session.getStatus());
+        snapshot.put("resumeFileUrl", session.getResumeFileUrl());
+        snapshot.put("interviewerAgentId", session.getInterviewerAgentId());
+        snapshot.put("sessionStartTime", session.getStartTime());
+        snapshot.put("sessionEndTime", session.getEndTime());
+        snapshot.put("resumeScore", resumeScore);
+        snapshot.put("interviewScore", interviewScore);
+        snapshot.put("questionCount", questionCount);
+        snapshot.put("interviewDirection", interviewDirection);
+        snapshot.put("interviewType", session.getInterviewType());
+        snapshot.put("interviewStatus", interviewStatus);
+        snapshot.put("interviewSuggestions", interviewSuggestions);
+        snapshot.put("flow", interviewQuestionCacheService.getInterviewFlow(session.getSessionId()));
+        snapshot.put("turns", turns);
+        snapshot.put("radar", radarChart);
+        snapshot.put("reviewFeedback", buildReviewFeedback(turns, radarChart, interviewSuggestions));
+        snapshot.put("snapshotAt", new Date());
+        return JSON.toJSONString(snapshot);
+    }
+
+    /**
+     * Populate structured report fields for frontend rendering:
+     * 1) radarChart / radarDimensions
+     * 2) playbackItems
+     */
+    private void enrichReportFields(String sessionId, InterviewRecordDO record, InterviewRecordRespDTO respDTO) {
+        Map<String, Object> snapshot = parseSnapshot(record == null ? null : record.getSessionSnapshotJson());
+
+        RadarChartDTO radarChart = parseRadarFromSnapshot(snapshot);
+        if (radarChart == null) {
+            radarChart = interviewQuestionCacheService.getRadarChartData(sessionId);
+        }
+        if (radarChart == null) {
+            radarChart = new RadarChartDTO();
+        }
+        respDTO.setRadarChart(radarChart);
+        respDTO.setRadarDimensions(buildRadarDimensions(radarChart));
+
+        List<InterviewTurnLog> turns = parseTurnsFromSnapshot(snapshot);
+        if (turns == null || turns.isEmpty()) {
+            turns = interviewQuestionCacheService.getInterviewTurns(sessionId);
+        }
+        respDTO.setPlaybackItems(buildPlaybackItems(turns));
+        respDTO.setReviewFeedback(resolveReviewFeedback(snapshot, turns, radarChart, record));
+    }
+
+    private Map<String, Object> parseSnapshot(String snapshotJson) {
+        if (StrUtil.isBlank(snapshotJson)) {
+            return Collections.emptyMap();
+        }
+        try {
+            Map<String, Object> parsed = JSON.parseObject(
+                    snapshotJson,
+                    new TypeReference<LinkedHashMap<String, Object>>() {
+                    }
+            );
+            return parsed == null ? Collections.emptyMap() : parsed;
+        } catch (Exception ex) {
+            log.warn("Failed to parse session snapshot json", ex);
+            return Collections.emptyMap();
+        }
+    }
+
+    private RadarChartDTO parseRadarFromSnapshot(Map<String, Object> snapshot) {
+        if (snapshot == null || snapshot.isEmpty()) {
+            return null;
+        }
+        Object radarObj = snapshot.get("radar");
+        if (radarObj == null) {
+            return null;
+        }
+        try {
+            return JSON.parseObject(JSON.toJSONString(radarObj), RadarChartDTO.class);
+        } catch (Exception ex) {
+            log.warn("Failed to parse radar from snapshot", ex);
+            return null;
+        }
+    }
+
+    private List<InterviewTurnLog> parseTurnsFromSnapshot(Map<String, Object> snapshot) {
+        if (snapshot == null || snapshot.isEmpty()) {
+            return Collections.emptyList();
+        }
+        Object turnsObj = snapshot.get("turns");
+        if (turnsObj == null) {
+            return Collections.emptyList();
+        }
+        try {
+            List<InterviewTurnLog> parsedTurns = JSON.parseArray(
+                    JSON.toJSONString(turnsObj),
+                    InterviewTurnLog.class
+            );
+            return parsedTurns == null ? Collections.emptyList() : parsedTurns;
+        } catch (Exception ex) {
+            log.warn("Failed to parse turns from snapshot", ex);
+            return Collections.emptyList();
+        }
+    }
+
+    private InterviewReviewFeedbackRespDTO resolveReviewFeedback(
+            Map<String, Object> snapshot,
+            List<InterviewTurnLog> turns,
+            RadarChartDTO radarChart,
+            InterviewRecordDO record) {
+        String interviewSuggestions = record == null ? null : record.getInterviewSuggestions();
+        InterviewReviewFeedbackRespDTO rebuilt = buildReviewFeedback(turns, radarChart, interviewSuggestions);
+        if (hasReviewFeedbackContent(rebuilt)) {
+            return rebuilt;
+        }
+        InterviewReviewFeedbackRespDTO parsed = parseReviewFeedbackFromSnapshot(snapshot);
+        return parsed != null ? parsed : rebuilt;
+    }
+
+    private InterviewReviewFeedbackRespDTO parseReviewFeedbackFromSnapshot(Map<String, Object> snapshot) {
+        if (snapshot == null || snapshot.isEmpty()) {
+            return null;
+        }
+        Object reviewFeedback = snapshot.get("reviewFeedback");
+        if (reviewFeedback == null) {
+            return null;
+        }
+        try {
+            return JSON.parseObject(JSON.toJSONString(reviewFeedback), InterviewReviewFeedbackRespDTO.class);
+        } catch (Exception ex) {
+            log.warn("Failed to parse review feedback from snapshot", ex);
+            return null;
+        }
+    }
+
+    private InterviewReviewFeedbackRespDTO buildReviewFeedback(
+            List<InterviewTurnLog> turns,
+            RadarChartDTO radarChart,
+            String interviewSuggestions) {
+        InterviewReviewFeedbackRespDTO reviewFeedback = new InterviewReviewFeedbackRespDTO();
+        reviewFeedback.setOverallComment(buildOverallComment(radarChart));
+        List<String> highlights = buildHighlights(turns, radarChart);
+        List<String> improvementTips = buildImprovementTips(turns, radarChart);
+        reviewFeedback.setHighlights(highlights);
+        reviewFeedback.setImprovementTips(improvementTips);
+        reviewFeedback.setNextActions(buildNextActions(interviewSuggestions, improvementTips));
+        return reviewFeedback;
+    }
+
+    private boolean hasReviewFeedbackContent(InterviewReviewFeedbackRespDTO reviewFeedback) {
+        if (reviewFeedback == null) {
+            return false;
+        }
+        return StrUtil.isNotBlank(reviewFeedback.getOverallComment())
+                || (reviewFeedback.getHighlights() != null && !reviewFeedback.getHighlights().isEmpty())
+                || (reviewFeedback.getImprovementTips() != null && !reviewFeedback.getImprovementTips().isEmpty())
+                || (reviewFeedback.getNextActions() != null && !reviewFeedback.getNextActions().isEmpty());
+    }
+
+    private String buildOverallComment(RadarChartDTO radarChart) {
+        int finalScore = radarChart == null ? 0 : clampScore(radarChart.getPotentialIndex());
+        String baseComment;
+        if (finalScore >= 85) {
+            baseComment = "整体表现优秀，已经具备较强的面试竞争力。";
+        } else if (finalScore >= 70) {
+            baseComment = "整体表现扎实，优势比较明确，但还有继续打磨的空间。";
+        } else if (finalScore >= 60) {
+            baseComment = "整体表现达到基础要求，但答题结构和岗位匹配度仍需加强。";
+        } else {
+            baseComment = "整体表现低于预期，建议优先补强岗位匹配度、回答深度和表达稳定性。";
+        }
+
+        String strongest = resolveDimensionLabel(findStrongestDimensionKey(radarChart));
+        String weakest = resolveDimensionLabel(findWeakestDimensionKey(radarChart));
+        if (StrUtil.isBlank(strongest) || StrUtil.isBlank(weakest) || strongest.equals(weakest)) {
+            return baseComment;
+        }
+        return baseComment + " 当前优势在" + strongest + "，后续优先提升" + weakest + "。";
+    }
+
+    private List<String> buildHighlights(List<InterviewTurnLog> turns, RadarChartDTO radarChart) {
+        List<String> highlights = extractFeedbackLines(turns, 80, Integer.MAX_VALUE, 3);
+        if (!highlights.isEmpty()) {
+            return highlights;
+        }
+
+        LinkedHashSet<String> generated = new LinkedHashSet<>();
+        if (radarChart != null && clampScore(radarChart.getResumeScore()) >= 75) {
+            generated.add("你的简历与目标岗位匹配度较高，核心经历亮点比较清晰。");
+        }
+        if (radarChart != null && clampScore(radarChart.getInterviewPerformance()) >= 75) {
+            generated.add("你的回答结构比较完整，能够较稳定地围绕问题展开。");
+        }
+        if (radarChart != null && clampScore(radarChart.getDemeanorEvaluation()) >= 75) {
+            generated.add("你的神态和表达状态比较稳定，整体临场表现自然。");
+        }
+        if (radarChart != null && clampScore(radarChart.getProfessionalSkills()) >= 75) {
+            generated.add("你的专业能力表达较清晰，能够体现一定的项目经验和技术理解。");
+        }
+        return limitList(generated, 3);
+    }
+
+    private List<String> buildImprovementTips(List<InterviewTurnLog> turns, RadarChartDTO radarChart) {
+        List<String> improvements = extractFeedbackLines(turns, 0, 69, 3);
+        if (!improvements.isEmpty()) {
+            return improvements;
+        }
+
+        LinkedHashSet<String> generated = new LinkedHashSet<>();
+        appendImprovementByDimension(generated, "resume_score", radarChart);
+        appendImprovementByDimension(generated, "interview_performance", radarChart);
+        appendImprovementByDimension(generated, "demeanor_evaluation", radarChart);
+        appendImprovementByDimension(generated, "professional_skills", radarChart);
+        return limitList(generated, 3);
+    }
+
+    private void appendImprovementByDimension(LinkedHashSet<String> generated, String dimensionKey, RadarChartDTO radarChart) {
+        if (generated.size() >= 3 || radarChart == null) {
+            return;
+        }
+        int score = getDimensionScore(radarChart, dimensionKey);
+        if (score >= 75) {
+            return;
+        }
+        switch (dimensionKey) {
+            case "resume_score" ->
+                    generated.add("建议进一步围绕目标岗位优化简历亮点，补充更具体的项目结果和业务价值。");
+            case "interview_performance" ->
+                    generated.add("建议回答时更聚焦问题本身，尽量用更清晰的结构补充案例、动作和结果。");
+            case "demeanor_evaluation" ->
+                    generated.add("建议继续练习语速控制、停顿节奏和镜头前更稳定的表达状态。");
+            case "professional_skills" ->
+                    generated.add("建议把专业能力讲得更具体，补充技术取舍、难点处理和最终效果。");
+            default -> {
+            }
+        }
+    }
+
+    private List<String> buildNextActions(String interviewSuggestions, List<String> improvementTips) {
+        LinkedHashSet<String> actions = new LinkedHashSet<>();
+        if (StrUtil.isNotBlank(interviewSuggestions)) {
+            actions.addAll(parseInterviewSuggestions(interviewSuggestions).values());
+        }
+        if (improvementTips != null) {
+            actions.addAll(improvementTips);
+        }
+        return limitList(actions, 3);
+    }
+
+    private List<String> extractFeedbackLines(List<InterviewTurnLog> turns, int minScore, int maxScore, int limit) {
+        if (turns == null || turns.isEmpty()) {
+            return Collections.emptyList();
+        }
+        LinkedHashSet<String> lines = new LinkedHashSet<>();
+        for (InterviewTurnLog turn : turns) {
+            if (turn == null || turn.getScore() == null || StrUtil.isBlank(turn.getFeedback())) {
+                continue;
+            }
+            int score = clampScore(turn.getScore());
+            if (score < minScore || score > maxScore) {
+                continue;
+            }
+            for (String sentence : splitFeedback(turn.getFeedback())) {
+                if (lines.size() >= limit) {
+                    break;
+                }
+                lines.add(sentence);
+            }
+            if (lines.size() >= limit) {
+                break;
+            }
+        }
+        return new ArrayList<>(lines);
+    }
+
+    private List<String> splitFeedback(String feedback) {
+        if (StrUtil.isBlank(feedback)) {
+            return Collections.emptyList();
+        }
+        String[] rawParts = feedback.split("[;.!?\\r\\n\\u3002\\uff1b\\uff01\\uff1f]+");
+        List<String> parts = new ArrayList<>(rawParts.length);
+        for (String rawPart : rawParts) {
+            String sentence = StrUtil.trim(rawPart);
+            if (StrUtil.isBlank(sentence) || sentence.length() < 6) {
+                continue;
+            }
+            parts.add(sentence.endsWith("。") ? sentence : sentence + "。");
+        }
+        return parts;
+    }
+
+    private List<String> limitList(LinkedHashSet<String> items, int limit) {
+        if (items == null || items.isEmpty() || limit <= 0) {
+            return Collections.emptyList();
+        }
+        List<String> result = new ArrayList<>(limit);
+        for (String item : items) {
+            if (StrUtil.isBlank(item)) {
+                continue;
+            }
+            result.add(item);
+            if (result.size() >= limit) {
+                break;
+            }
+        }
+        return result;
+    }
+
+    private String findStrongestDimensionKey(RadarChartDTO radarChart) {
+        return findDimensionKey(radarChart, true);
+    }
+
+    private String findWeakestDimensionKey(RadarChartDTO radarChart) {
+        return findDimensionKey(radarChart, false);
+    }
+
+    private String findDimensionKey(RadarChartDTO radarChart, boolean strongest) {
+        if (radarChart == null) {
+            return null;
+        }
+        String[] keys = new String[]{"resume_score", "interview_performance", "demeanor_evaluation", "professional_skills"};
+        String targetKey = null;
+        int targetScore = strongest ? Integer.MIN_VALUE : Integer.MAX_VALUE;
+        for (String key : keys) {
+            int score = getDimensionScore(radarChart, key);
+            if ((strongest && score > targetScore) || (!strongest && score < targetScore)) {
+                targetScore = score;
+                targetKey = key;
+            }
+        }
+        return targetKey;
+    }
+
+    private int getDimensionScore(RadarChartDTO radarChart, String key) {
+        if (radarChart == null || StrUtil.isBlank(key)) {
+            return 0;
+        }
+        return switch (key) {
+            case "resume_score" -> clampScore(radarChart.getResumeScore());
+            case "interview_performance" -> clampScore(radarChart.getInterviewPerformance());
+            case "demeanor_evaluation" -> clampScore(radarChart.getDemeanorEvaluation());
+            case "professional_skills" -> clampScore(radarChart.getProfessionalSkills());
+            case "potential_index" -> clampScore(radarChart.getPotentialIndex());
+            default -> 0;
+        };
+    }
+
+    private String resolveDimensionLabel(String dimensionKey) {
+        if (StrUtil.isBlank(dimensionKey)) {
+            return null;
+        }
+        return switch (dimensionKey) {
+            case "resume_score" -> "简历匹配度";
+            case "interview_performance" -> "答题表现";
+            case "demeanor_evaluation" -> "神态表达";
+            case "professional_skills" -> "专业能力呈现";
+            case "potential_index" -> "综合潜力";
+            default -> null;
+        };
+    }
+
+    private List<RadarDimensionItemRespDTO> buildRadarDimensions(RadarChartDTO radarChart) {
+        if (radarChart == null) {
+            return Collections.emptyList();
+        }
+        List<RadarDimensionItemRespDTO> dimensions = new ArrayList<>(5);
+        dimensions.add(new RadarDimensionItemRespDTO("resume_score", "Resume", clampScore(radarChart.getResumeScore())));
+        dimensions.add(new RadarDimensionItemRespDTO("interview_performance", "Interview", clampScore(radarChart.getInterviewPerformance())));
+        dimensions.add(new RadarDimensionItemRespDTO("demeanor_evaluation", "Demeanor", clampScore(radarChart.getDemeanorEvaluation())));
+        dimensions.add(new RadarDimensionItemRespDTO("professional_skills", "Skills", clampScore(radarChart.getProfessionalSkills())));
+        dimensions.add(new RadarDimensionItemRespDTO("potential_index", "Potential", clampScore(radarChart.getPotentialIndex())));
+        return dimensions;
+    }
+
+    private List<InterviewPlaybackItemRespDTO> buildPlaybackItems(List<InterviewTurnLog> turns) {
+        if (turns == null || turns.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<InterviewPlaybackItemRespDTO> items = new ArrayList<>(turns.size());
+        for (int i = 0; i < turns.size(); i++) {
+            InterviewTurnLog turn = turns.get(i);
+            if (turn == null) {
+                continue;
+            }
+            InterviewPlaybackItemRespDTO item = new InterviewPlaybackItemRespDTO();
+            item.setSeq(i + 1);
+            item.setTimestamp(turn.getTimestamp());
+            item.setRequestId(turn.getRequestId());
+            item.setQuestionNumber(turn.getQuestionNumber());
+            item.setQuestionContent(turn.getQuestionContent());
+            item.setAnswerContent(turn.getAnswerContent());
+            item.setScore(turn.getScore());
+            item.setFeedback(turn.getFeedback());
+            item.setTotalScore(turn.getTotalScore());
+            item.setNextQuestionNumber(turn.getNextQuestionNumber());
+            item.setNextQuestion(turn.getNextQuestion());
+            item.setFinished(turn.getFinished());
+            items.add(item);
+        }
+        return items;
+    }
+
+    private Integer clampScore(Integer score) {
+        if (score == null) {
+            return 0;
+        }
+        if (score < 0) {
+            return 0;
+        }
+        return Math.min(score, 100);
+    }
+
+    @Override
+    public Map<String, String> parseInterviewSuggestions(String suggestionsString) {
+        Map<String, String> suggestionsMap = new LinkedHashMap<>();
+        if (StrUtil.isBlank(suggestionsString)) {
+            return suggestionsMap;
+        }
+
+        String[] suggestions = suggestionsString.split(";");
+        for (int i = 0; i < suggestions.length; i++) {
+            String suggestion = suggestions[i].trim();
+            if (StrUtil.isNotBlank(suggestion)) {
+                suggestionsMap.put(String.valueOf(i + 1), suggestion);
+            }
+        }
+
+        log.debug("Parsed interview suggestions, rawLength={}, parsedCount={}",
+                suggestionsString.length(), suggestionsMap.size());
+        return suggestionsMap;
+    }
+}
