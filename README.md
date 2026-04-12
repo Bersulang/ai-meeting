@@ -23,6 +23,7 @@
 2. 再看 [快速启动指南](docs/quick-start-zh.md)
 3. 然后看 [后端接口总览](docs/backend-api-overview-zh.md)
 4. 最后看 [后端架构说明](docs/backend-architecture-zh.md)
+5. 面试链路细节可看 [Agent 面试流程图与架构图](docs/agent-interview-flow-architecture-zh.md)
 
 ## 架构简图
 
@@ -104,6 +105,7 @@ curl http://localhost:8002/actuator/health
 - [快速启动指南](docs/quick-start-zh.md)
 - [后端接口总览](docs/backend-api-overview-zh.md)
 - [后端架构说明](docs/backend-architecture-zh.md)
+- [Agent 面试流程图与架构图](docs/agent-interview-flow-architecture-zh.md)
 
 仓库中保留了更细的联调、PRD 和分阶段实施文档，统一放在 [`docs/`](docs/) 目录下。
 
