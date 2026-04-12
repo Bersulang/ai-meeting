@@ -34,12 +34,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.Base64;
-import java.util.List;
-import java.util.Map;
-import java.util.TreeMap;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -180,6 +175,7 @@ public class XunfeiAudioService {
 
         AstTranscriptionAssembler assembler = new AstTranscriptionAssembler();
         AtomicInteger fallbackSn = new AtomicInteger(0);
+        AtomicInteger rawPacketCounter = new AtomicInteger(0);
         StringBuilder latestDisplay = new StringBuilder();
         Request request = new Request.Builder().url(wsUrl).build();
         WS_CLIENT.newWebSocket(request, new WebSocketListener() {
@@ -191,6 +187,8 @@ public class XunfeiAudioService {
             @Override
             public void onMessage(WebSocket webSocket, String text) {
                 try {
+                    int packetNo = rawPacketCounter.incrementAndGet();
+                    log.info("[ASR_RAW_PACKET] sessionId={}, packetNo={}, payload={}", sessionId, packetNo, text);
                     JSONObject root = JSONObject.parseObject(text);
                     String action = root.getString("action");
                     if ("error".equalsIgnoreCase(action)) {
@@ -349,6 +347,112 @@ public class XunfeiAudioService {
         }
 
         upsertAstSegment(sentencePool, sn, text, finalized);
+    }
+
+    private void applyAstSegmentWithoutPgs(TreeMap<Integer, SegmentState> sentencePool,
+                                           int sn,
+                                           Integer bg,
+                                           Integer ed,
+                                           String text,
+                                           boolean finalized) {
+        if (sentencePool == null || text == null) {
+            return;
+        }
+
+        SegmentState sameRange = findExactRangeState(sentencePool, bg, ed);
+        if (sameRange != null && isPunctuationOnly(text) && StrUtil.isNotBlank(sameRange.text)) {
+            sameRange.text = appendTrailingPunctuation(sameRange.text, text);
+            sameRange.finalized = sameRange.finalized || finalized;
+            sameRange.updatedAt = System.currentTimeMillis();
+            return;
+        }
+
+        removeOverlappingRangeStates(sentencePool, bg, ed);
+        upsertAstSegment(sentencePool, sn, text, finalized);
+        SegmentState state = sentencePool.get(sn);
+        if (state != null) {
+            state.bg = bg;
+            state.ed = ed;
+        }
+    }
+
+    private SegmentState findExactRangeState(TreeMap<Integer, SegmentState> sentencePool, Integer bg, Integer ed) {
+        if (bg == null || ed == null || sentencePool == null || sentencePool.isEmpty()) {
+            return null;
+        }
+        for (SegmentState state : sentencePool.values()) {
+            if (state == null || state.bg == null || state.ed == null) {
+                continue;
+            }
+            if (state.bg.equals(bg) && state.ed.equals(ed)) {
+                return state;
+            }
+        }
+        return null;
+    }
+
+    private void removeOverlappingRangeStates(TreeMap<Integer, SegmentState> sentencePool, Integer bg, Integer ed) {
+        if (bg == null || ed == null || sentencePool == null || sentencePool.isEmpty()) {
+            return;
+        }
+        Iterator<Map.Entry<Integer, SegmentState>> iterator = sentencePool.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<Integer, SegmentState> entry = iterator.next();
+            SegmentState state = entry.getValue();
+            if (state == null || state.bg == null || state.ed == null) {
+                continue;
+            }
+            if (isRangeOverlapping(bg, ed, state.bg, state.ed)) {
+                iterator.remove();
+            }
+        }
+    }
+
+    private boolean isRangeOverlapping(int bg1, int ed1, int bg2, int ed2) {
+        return bg1 <= ed2 && bg2 <= ed1;
+    }
+
+    private boolean isPunctuationOnly(String text) {
+        if (StrUtil.isBlank(text)) {
+            return false;
+        }
+        String trimmed = rtrim(text);
+        if (trimmed.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < trimmed.length(); i++) {
+            char ch = trimmed.charAt(i);
+            if (Character.isWhitespace(ch)) {
+                continue;
+            }
+            if (Character.isLetterOrDigit(ch) || Character.UnicodeScript.of(ch) == Character.UnicodeScript.HAN) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private String appendTrailingPunctuation(String baseText, String punctuation) {
+        String base = rtrim(baseText);
+        String suffix = rtrim(punctuation);
+        if (suffix.isEmpty()) {
+            return base;
+        }
+        if (base.endsWith(suffix)) {
+            return base;
+        }
+        return base + suffix;
+    }
+
+    private String rtrim(String text) {
+        if (text == null) {
+            return "";
+        }
+        int end = text.length();
+        while (end > 0 && Character.isWhitespace(text.charAt(end - 1))) {
+            end--;
+        }
+        return text.substring(0, end);
     }
 
     private void upsertAstSegment(TreeMap<Integer, SegmentState> sentencePool,
@@ -512,8 +616,14 @@ public class XunfeiAudioService {
                            AtomicInteger fallbackSn) {
             int segmentId = resolveSegmentId(root, st, fallbackSn);
             String pgs = st != null ? st.getString("pgs") : null;
-            int[] rg = extractRg(st);
+            Integer bg = st != null ? st.getInteger("bg") : null;
+            Integer ed = st != null ? st.getInteger("ed") : null;
             boolean finalized = isAstFinal(root);
+            if (StrUtil.isBlank(pgs)) {
+                applyAstSegmentWithoutPgs(segments, segmentId, bg, ed, text, finalized);
+                return;
+            }
+            int[] rg = extractRg(st);
             applyAstSegment(segments, segmentId, pgs, rg, text, finalized);
         }
 
@@ -526,6 +636,8 @@ public class XunfeiAudioService {
         private final int segId;
         private String text;
         private boolean finalized;
+        private Integer bg;
+        private Integer ed;
         private long updatedAt;
 
         private SegmentState(int segId) {

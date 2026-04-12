@@ -125,11 +125,12 @@ public class AudioTranscriptionWebSocketHandler {
             byte[] audioData = new byte[byteBuffer.remaining()];
             byteBuffer.get(audioData);
 
-            TranscriptionSessionContext context = TRANSCRIPTION_CONTEXTS.computeIfAbsent(
-                    sessionId, ignored -> createAndStartTranscriptionSession(session, userId)
-            );
+            TranscriptionSessionContext context = TRANSCRIPTION_CONTEXTS.get(sessionId);
             if (context == null || !context.active.get()) {
-                sendMessage(session, createResponse("error", "Transcription session is not ready", null));
+                log.warn("Audio chunk received before transcription session started, userId={}, sessionId={}",
+                        userId, sessionId);
+                sendMessage(session, createResponse("error",
+                        "Transcription session is not started. Send start_transcription first.", null));
                 return;
             }
 
@@ -182,8 +183,13 @@ public class AudioTranscriptionWebSocketHandler {
             case "ping" -> sendMessage(session, createResponse("pong", "pong", String.valueOf(System.currentTimeMillis())));
             case "start_transcription" -> startTranscriptionSession(session, userId);
             case "stop_transcription" -> {
-                stopTranscriptionSession(session.getId());
-                sendMessage(session, createResponse("transcription_stopped", "Transcription stopped", null));
+                boolean stopped = stopTranscriptionSession(session.getId());
+                if (stopped) {
+                    sendMessage(session, createResponse("transcription_stopped", "Transcription stopped", null));
+                } else {
+                    sendMessage(session, createResponse("transcription_already_stopped",
+                            "Transcription is already stopped", null));
+                }
             }
             case "get_status" -> sendMessage(session, createResponse("status", "Connection is healthy", userId));
             default -> sendMessage(session, createResponse("unknown_command", "Unknown command: " + type, null));
@@ -218,10 +224,27 @@ public class AudioTranscriptionWebSocketHandler {
 
     private void startTranscriptionSession(Session session, String userId) {
         String sessionId = session.getId();
+        TranscriptionSessionContext existing = TRANSCRIPTION_CONTEXTS.get(sessionId);
+        if (existing != null && existing.active.get() && !existing.stopRequested.get()) {
+            sendMessage(session, createResponse("transcription_already_started",
+                    "Transcription is already started", null));
+            return;
+        }
+
         stopTranscriptionSession(sessionId);
 
         TranscriptionSessionContext context = createAndStartTranscriptionSession(session, userId);
         if (context != null) {
+            TranscriptionSessionContext raced = TRANSCRIPTION_CONTEXTS.putIfAbsent(sessionId, context);
+            if (raced != null && raced.active.get() && !raced.stopRequested.get()) {
+                context.active.set(false);
+                context.stopRequested.set(true);
+                closeQuietly(context.audioOutputStream);
+                closeQuietly(context.audioInputStream);
+                sendMessage(session, createResponse("transcription_already_started",
+                        "Transcription is already started", null));
+                return;
+            }
             TRANSCRIPTION_CONTEXTS.put(sessionId, context);
             sendMessage(session, createResponse("transcription_started", "Transcription started", null));
         } else {
@@ -251,7 +274,7 @@ public class AudioTranscriptionWebSocketHandler {
                     sendMessage(session, createResponse("error", "Transcription failed: " + throwable.getMessage(), null));
                 } else {
                     log.info("Transcription finished, userId={}, sessionId={}", userId, sessionId);
-                    if (finalResult != null) {
+                    if (!context.stopRequested.get() && finalResult != null) {
                         sendMessage(session, createResponse("final", "Transcription completed", finalResult, true));
                     }
                 }
@@ -264,14 +287,15 @@ public class AudioTranscriptionWebSocketHandler {
         }
     }
 
-    private void stopTranscriptionSession(String sessionId) {
+    private boolean stopTranscriptionSession(String sessionId) {
         TranscriptionSessionContext context = TRANSCRIPTION_CONTEXTS.remove(sessionId);
         if (context == null) {
-            return;
+            return false;
         }
         context.active.set(false);
         context.stopRequested.set(true);
         closeQuietly(context.audioOutputStream);
+        return true;
     }
 
     private void cleanupTranscriptionContext(String sessionId, TranscriptionSessionContext context) {
