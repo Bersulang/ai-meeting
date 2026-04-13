@@ -82,6 +82,21 @@ public interface InterviewQuestionCacheService {
      * @return 神态管理评分
      */
     Integer getSessionDemeanorScore(String sessionId);
+
+    /**
+     * Cache one follow-up question for the current session.
+     * @param sessionId session id
+     * @param questionNumber follow-up question number, such as 1-F1
+     * @param questionContent question content
+     */
+    void cacheFollowUpQuestion(String sessionId, String questionNumber, String questionContent);
+
+    /**
+     * Get cached follow-up questions for a session.
+     * @param sessionId session id
+     * @return follow-up question map
+     */
+    Map<String, String> getSessionFollowUpQuestions(String sessionId);
     
     /**
      * 根据题号获取题目
@@ -210,6 +225,14 @@ public interface InterviewQuestionCacheService {
      * @return updated flow state
      */
     InterviewFlowState incrementFollowUpCount(String sessionId);
+
+    /**
+     * Enter one follow-up question for the current main question.
+     * @param sessionId session id
+     * @param questionNumber follow-up question number
+     * @return updated flow state
+     */
+    InterviewFlowState startFollowUpQuestion(String sessionId, String questionNumber);
 
     /**
      * Advance to next main question.

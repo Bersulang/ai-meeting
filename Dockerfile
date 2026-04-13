@@ -1,7 +1,10 @@
 # Xunzhi backend Dockerfile
 # Multi-stage build for a lean runtime image.
 
-FROM maven:3.9.4-openjdk-17-slim AS builder
+ARG BUILDER_IMAGE=maven:3.9.11-eclipse-temurin-17
+ARG RUNTIME_IMAGE=eclipse-temurin:17-jre-jammy
+
+FROM ${BUILDER_IMAGE} AS builder
 
 WORKDIR /app
 
@@ -12,9 +15,9 @@ RUN mvn dependency:go-offline -B
 
 COPY . .
 
-RUN mvn clean package -DskipTests -B
+RUN mvn clean package -Dmaven.test.skip=true -B
 
-FROM eclipse-temurin:17-jre-jammy
+FROM ${RUNTIME_IMAGE}
 
 LABEL maintainer="xunzhi-agent-team"
 LABEL description="Xunzhi Agent Backend Service"

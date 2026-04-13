@@ -92,11 +92,11 @@ xunzhi-agent:
     audio-temp-dir: ${XUNZHI_AUDIO_TEMP_DIR:${xunzhi-agent.storage.base-dir}/temp/audio}
     log-dir: ${XUNZHI_LOG_DIR:${xunzhi-agent.storage.base-dir}/logs}
   agent-binding:
-    general-agent-chat: ${XUNZHI_AGENT_GENERAL_CHAT:\u901a\u7528\u667a\u80fd\u4f53}
-    interview-question-extraction: ${XUNZHI_AGENT_INTERVIEW_QUESTION_EXTRACTION:\u9762\u8bd5\u51fa\u9898\u5b98}
-    interview-answer-evaluation: ${XUNZHI_AGENT_INTERVIEW_ANSWER_EVALUATION:\u7528\u6237\u7b54\u6848\u8bc4\u5206\u5b98}
-    interview-demeanor: ${XUNZHI_AGENT_INTERVIEW_DEMEANOR:\u795e\u6001\u5206\u6790\u5b98}
-    interview-question-asking: ${XUNZHI_AGENT_INTERVIEW_QUESTION_ASKING:\u9762\u8bd5\u63d0\u95ee\u5b98}
+    general-agent-chat: ${XUNZHI_AGENT_GENERAL_CHAT:通用智能体}
+    interview-question-extraction: ${XUNZHI_AGENT_INTERVIEW_QUESTION_EXTRACTION:面试出题官}
+    interview-answer-evaluation: ${XUNZHI_AGENT_INTERVIEW_ANSWER_EVALUATION:用户答案评分官}
+    interview-demeanor: ${XUNZHI_AGENT_INTERVIEW_DEMEANOR:神态分析官}
+    interview-question-asking: ${XUNZHI_AGENT_INTERVIEW_QUESTION_ASKING:面试提问官}
   flow-limit:
     enable: true
     time-window-seconds: 1

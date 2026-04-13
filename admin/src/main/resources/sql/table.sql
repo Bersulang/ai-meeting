@@ -1,3 +1,5 @@
+SET NAMES utf8mb4;
+
 create table admin_permission
 (
     id          bigint auto_increment comment 'ID'

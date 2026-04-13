@@ -1,8 +1,6 @@
-version: "3.9"
-
 services:
   mysql:
-    image: mysql:8.4
+    image: ${MYSQL_IMAGE:-mysql:8.4}
     container_name: xunzhi-mysql
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-123456}
@@ -10,12 +8,15 @@ services:
     ports:
       - "3306:3306"
     command:
-      - --default-authentication-plugin=mysql_native_password
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./admin/src/main/resources/sql:/docker-entrypoint-initdb.d/feature-sql:ro
+      - ./admin/src/main/resources/sql/table.sql:/docker-entrypoint-initdb.d/01-table.sql:ro
+      - ./admin/src/main/resources/sql/admin_permission.sql:/docker-entrypoint-initdb.d/02-admin_permission.sql:ro
+      - ./admin/src/main/resources/sql/agent_properties.sql:/docker-entrypoint-initdb.d/03-agent_properties.sql:ro
+      - ./admin/src/main/resources/sql/ai_properties.sql:/docker-entrypoint-initdb.d/04-ai_properties.sql:ro
+      - ./admin/src/main/resources/sql/t_user.sql:/docker-entrypoint-initdb.d/05-t_user.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h localhost -p${MYSQL_PASSWORD:-123456}"]
       interval: 15s
@@ -23,7 +24,7 @@ services:
       retries: 10
 
   mongo:
-    image: mongo:7.0
+    image: ${MONGO_IMAGE:-mongo:7.0}
     container_name: xunzhi-mongo
     ports:
       - "27017:27017"
@@ -36,7 +37,7 @@ services:
       retries: 10
 
   redis:
-    image: redis:7.2
+    image: ${REDIS_IMAGE:-redis:7.2}
     container_name: xunzhi-redis
     ports:
       - "6379:6379"
@@ -53,6 +54,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BUILDER_IMAGE: ${BUILDER_IMAGE:-maven:3.9.11-eclipse-temurin-17}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-eclipse-temurin:17-jre-jammy}
     container_name: xunzhi-backend
     depends_on:
       mysql:

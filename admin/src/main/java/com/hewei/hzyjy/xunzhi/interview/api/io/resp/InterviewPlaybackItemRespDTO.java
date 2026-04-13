@@ -54,6 +54,21 @@ public class InterviewPlaybackItemRespDTO {
     private Integer totalScore;
 
     /**
+     * 是否触发了继续追问判断。
+     */
+    private Boolean followUpNeeded;
+
+    /**
+     * 当前轮是否为追问。
+     */
+    private Boolean isFollowUp;
+
+    /**
+     * 当前主问题下的追问轮次。
+     */
+    private Integer followUpCount;
+
+    /**
      * 下一题题号。
      */
     private String nextQuestionNumber;
