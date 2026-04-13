@@ -7,6 +7,7 @@ import com.hewei.hzyjy.xunzhi.agent.dao.entity.AgentPropertiesDO;
 import com.hewei.hzyjy.xunzhi.interview.api.io.req.InterviewAnswerReqDTO;
 import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewAnswerRespDTO;
 import com.hewei.hzyjy.xunzhi.interview.application.InterviewEvaluationService;
+import com.hewei.hzyjy.xunzhi.interview.application.InterviewFollowUpService;
 import com.hewei.hzyjy.xunzhi.interview.application.InterviewResponseParser;
 import com.hewei.hzyjy.xunzhi.interview.application.flow.InterviewFlowStateMachine;
 import com.hewei.hzyjy.xunzhi.interview.service.InterviewQuestionCacheService;
@@ -26,6 +27,7 @@ public class InterviewAnswerPipeline {
     private final BusinessAgentResolver businessAgentResolver;
     private final InterviewQuestionCacheService interviewQuestionCacheService;
     private final InterviewEvaluationService interviewEvaluationService;
+    private final InterviewFollowUpService interviewFollowUpService;
     private final InterviewResponseParser interviewResponseParser;
     private final InterviewFlowStateMachine interviewFlowStateMachine;
 
@@ -68,6 +70,10 @@ public class InterviewAnswerPipeline {
             ctx.response.fail("request body cannot be empty");
             return false;
         }
+        if (StrUtil.isBlank(ctx.requestParam.getQuestionNumber())) {
+            ctx.response.fail("question number cannot be empty");
+            return false;
+        }
         if (StrUtil.isBlank(ctx.requestParam.getAnswerContent())) {
             ctx.response.fail("answer content cannot be empty");
             return false;
@@ -90,7 +96,7 @@ public class InterviewAnswerPipeline {
     }
 
     private boolean stepLoadCurrentQuestion(InterviewAnswerPipelineContext ctx) {
-        ctx.flowState = ensureInterviewFlow(ctx.sessionId);
+        ctx.flowState = ensureInterviewFlow(ctx.sessionId, ctx.requestParam.getQuestionNumber());
         if (ctx.flowState == null) {
             ctx.response.fail("interview flow not initialized");
             return false;
@@ -113,6 +119,10 @@ public class InterviewAnswerPipeline {
             ctx.response.fail("question does not exist or expired");
             return false;
         }
+
+        ctx.currentIsFollowUp = isFollowUpQuestion(ctx.currentQuestionNumber);
+        ctx.currentFollowUpCount = resolveFollowUpCount(ctx.flowState, ctx.currentQuestionNumber);
+        ctx.maxFollowUp = resolveMaxFollowUp(ctx.flowState);
         ctx.response.withCurrentQuestion(ctx.currentQuestionNumber, ctx.currentQuestion);
         return true;
     }
@@ -145,7 +155,12 @@ public class InterviewAnswerPipeline {
             return false;
         }
 
-        Integer totalScore = interviewQuestionCacheService.addSessionScore(ctx.sessionId, score);
+        ctx.followUpNeeded = interviewResponseParser.asBoolean(evaluationResult.get("follow_up_needed"));
+        ctx.followUpQuestion = sanitizeFollowUpQuestion(interviewResponseParser.asString(evaluationResult.get("follow_up_question")));
+
+        Integer totalScore = Boolean.TRUE.equals(ctx.currentIsFollowUp)
+                ? interviewQuestionCacheService.getSessionTotalScore(ctx.sessionId)
+                : interviewQuestionCacheService.addSessionScore(ctx.sessionId, score);
         ctx.score = score;
         ctx.totalScore = totalScore;
         ctx.response.withEvaluation(score, interviewResponseParser.asString(evaluationResult.get("feedback")), totalScore);
@@ -153,6 +168,40 @@ public class InterviewAnswerPipeline {
     }
 
     private boolean stepAdvanceFlowAndAssemble(InterviewAnswerPipelineContext ctx) {
+        if (ctx.followUpNeeded && ctx.currentFollowUpCount < ctx.maxFollowUp) {
+            InterviewFollowUpService.FollowUpQuestionResult followUpQuestionResult = interviewFollowUpService.generateFollowUpQuestion(
+                    ctx.sessionId,
+                    ctx.requestId,
+                    ctx.currentQuestionNumber,
+                    ctx.currentQuestion,
+                    ctx.requestParam.getAnswerContent(),
+                    ctx.followUpQuestion,
+                    ctx.currentFollowUpCount,
+                    ctx.maxFollowUp
+            );
+            if (followUpQuestionResult.hasQuestion()) {
+                interviewQuestionCacheService.cacheFollowUpQuestion(
+                        ctx.sessionId,
+                        followUpQuestionResult.getQuestionNumber(),
+                        followUpQuestionResult.getQuestionContent()
+                );
+                InterviewFlowState followUpFlow = interviewFlowStateMachine.startFollowUpQuestion(
+                        ctx.sessionId,
+                        followUpQuestionResult.getQuestionNumber()
+                );
+                Integer nextFollowUpCount = followUpFlow != null && followUpFlow.getFollowUpCount() != null
+                        ? followUpFlow.getFollowUpCount()
+                        : followUpQuestionResult.getFollowUpCount();
+                ctx.response.withNextQuestion(
+                        followUpQuestionResult.getQuestionNumber(),
+                        followUpQuestionResult.getQuestionContent(),
+                        true,
+                        nextFollowUpCount
+                ).success();
+                return true;
+            }
+        }
+
         InterviewFlowState nextFlow = interviewFlowStateMachine.advanceMainQuestion(ctx.sessionId);
         if (nextFlow == null || interviewFlowStateMachine.isCompleted(nextFlow)) {
             interviewFlowStateMachine.markCompleted(ctx.sessionId);
@@ -182,9 +231,9 @@ public class InterviewAnswerPipeline {
                     .score(ctx.score)
                     .totalScore(ctx.totalScore)
                     .feedback(ctx.response.getFeedback())
-                    .followUpNeeded(false)
-                    .isFollowUp(false)
-                    .followUpCount(0)
+                    .followUpNeeded(ctx.followUpNeeded)
+                    .isFollowUp(ctx.currentIsFollowUp)
+                    .followUpCount(ctx.currentFollowUpCount)
                     .nextQuestionNumber(ctx.response.getNextQuestionNumber())
                     .nextQuestion(ctx.response.getNextQuestion())
                     .finished(ctx.response.getFinished())
@@ -195,7 +244,7 @@ public class InterviewAnswerPipeline {
         }
     }
 
-    private InterviewFlowState ensureInterviewFlow(String sessionId) {
+    private InterviewFlowState ensureInterviewFlow(String sessionId, String expectedQuestionNumber) {
         InterviewFlowState state = interviewFlowStateMachine.current(sessionId);
         if (state != null) {
             return state;
@@ -209,7 +258,41 @@ public class InterviewAnswerPipeline {
         if (questions == null || questions.isEmpty()) {
             return null;
         }
+        if (StrUtil.isNotBlank(expectedQuestionNumber)) {
+            InterviewFlowState restoredState = restoreFlowToQuestion(sessionId, expectedQuestionNumber, questions.size());
+            if (restoredState != null) {
+                return restoredState;
+            }
+        }
         return interviewFlowStateMachine.ensureInitialized(sessionId, questions.size());
+    }
+
+    private InterviewFlowState restoreFlowToQuestion(String sessionId, String questionNumber, int totalQuestions) {
+        if (StrUtil.isBlank(sessionId) || StrUtil.isBlank(questionNumber) || totalQuestions <= 0) {
+            return null;
+        }
+        interviewQuestionCacheService.initInterviewFlow(sessionId, totalQuestions);
+
+        Integer mainQuestionNo = extractMainQuestionNo(questionNumber);
+        if (mainQuestionNo == null || mainQuestionNo <= 0) {
+            return interviewFlowStateMachine.current(sessionId);
+        }
+
+        int targetMainQuestionNo = Math.min(mainQuestionNo, totalQuestions);
+        for (int currentMainQuestionNo = 1; currentMainQuestionNo < targetMainQuestionNo; currentMainQuestionNo++) {
+            InterviewFlowState advancedFlow = interviewFlowStateMachine.advanceMainQuestion(sessionId);
+            if (advancedFlow == null || interviewFlowStateMachine.isCompleted(advancedFlow)) {
+                return advancedFlow;
+            }
+        }
+
+        if (isFollowUpQuestion(questionNumber)) {
+            int followUpCount = extractFollowUpCount(questionNumber);
+            for (int index = 0; index < followUpCount; index++) {
+                interviewFlowStateMachine.startFollowUpQuestion(sessionId, questionNumber);
+            }
+        }
+        return interviewFlowStateMachine.current(sessionId);
     }
 
     private void fillNextQuestionFromFlow(String sessionId, InterviewAnswerRespDTO response) {
@@ -224,7 +307,12 @@ public class InterviewAnswerPipeline {
             response.fail("question does not exist or expired");
             return;
         }
-        response.withNextQuestion(questionNumber, nextQuestion, false, 0);
+        response.withNextQuestion(
+                questionNumber,
+                nextQuestion,
+                isFollowUpQuestion(questionNumber),
+                resolveFollowUpCount(state, questionNumber)
+        );
     }
 
     private String getQuestionWithReload(String sessionId, String questionNumber) {
@@ -232,11 +320,82 @@ public class InterviewAnswerPipeline {
             return null;
         }
         String questionContent = interviewQuestionCacheService.getQuestionByNumber(sessionId, questionNumber);
-        if (StrUtil.isBlank(questionContent)) {
+        if (StrUtil.isBlank(questionContent) && !isFollowUpQuestion(questionNumber)) {
             interviewQuestionCacheService.loadInterviewQuestionsFromDatabase(sessionId);
             questionContent = interviewQuestionCacheService.getQuestionByNumber(sessionId, questionNumber);
         }
         return questionContent;
+    }
+
+    private boolean isFollowUpQuestion(String questionNumber) {
+        return StrUtil.isNotBlank(questionNumber) && questionNumber.trim().matches("\\d+-F\\d+");
+    }
+
+    private Integer resolveFollowUpCount(InterviewFlowState flowState, String questionNumber) {
+        if (!isFollowUpQuestion(questionNumber)) {
+            return 0;
+        }
+        int parsedFollowUpCount = extractFollowUpCount(questionNumber);
+        if (parsedFollowUpCount > 0) {
+            return parsedFollowUpCount;
+        }
+        if (flowState != null && flowState.getFollowUpCount() != null) {
+            return Math.max(flowState.getFollowUpCount(), 0);
+        }
+        return 0;
+    }
+
+    private int resolveMaxFollowUp(InterviewFlowState flowState) {
+        if (flowState == null || flowState.getMaxFollowUp() == null || flowState.getMaxFollowUp() <= 0) {
+            return 2;
+        }
+        return flowState.getMaxFollowUp();
+    }
+
+    private Integer extractMainQuestionNo(String questionNumber) {
+        if (StrUtil.isBlank(questionNumber)) {
+            return null;
+        }
+        String normalized = questionNumber.trim();
+        int separatorIndex = normalized.indexOf("-F");
+        if (separatorIndex > 0) {
+            normalized = normalized.substring(0, separatorIndex);
+        }
+        try {
+            int parsed = Integer.parseInt(normalized);
+            return parsed > 0 ? parsed : null;
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private int extractFollowUpCount(String questionNumber) {
+        if (!isFollowUpQuestion(questionNumber)) {
+            return 0;
+        }
+        int separatorIndex = questionNumber.indexOf("-F");
+        if (separatorIndex < 0 || separatorIndex + 2 >= questionNumber.length()) {
+            return 0;
+        }
+        try {
+            return Math.max(Integer.parseInt(questionNumber.substring(separatorIndex + 2).trim()), 0);
+        } catch (Exception ex) {
+            return 0;
+        }
+    }
+
+    private String sanitizeFollowUpQuestion(String question) {
+        if (StrUtil.isBlank(question)) {
+            return null;
+        }
+        String normalized = question.trim();
+        if ("无".equals(normalized)
+                || "none".equalsIgnoreCase(normalized)
+                || "null".equalsIgnoreCase(normalized)
+                || "__FINISH__".equalsIgnoreCase(normalized)) {
+            return null;
+        }
+        return normalized;
     }
 
     private String truncateForLog(String value, int maxLength) {
@@ -254,7 +413,12 @@ public class InterviewAnswerPipeline {
         private InterviewFlowState flowState;
         private String currentQuestionNumber;
         private String currentQuestion;
+        private Boolean currentIsFollowUp;
+        private Integer currentFollowUpCount;
+        private Integer maxFollowUp;
         private Integer score;
         private Integer totalScore;
+        private Boolean followUpNeeded;
+        private String followUpQuestion;
     }
 }

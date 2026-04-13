@@ -12,6 +12,8 @@ public class InterviewFlowState {
 
     private Integer currentIndex;
 
+    private String currentQuestionNumber;
+
     private Integer totalQuestions;
 
     private Integer followUpCount;

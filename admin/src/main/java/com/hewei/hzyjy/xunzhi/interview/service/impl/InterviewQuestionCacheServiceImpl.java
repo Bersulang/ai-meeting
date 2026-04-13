@@ -73,6 +73,11 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
     private static final String INTERVIEW_FLOW_KEY = "interview:flow:session:";
 
     /**
+     * Follow-up question cache key prefix.
+     */
+    private static final String INTERVIEW_FOLLOW_UP_QUESTIONS_KEY = "interview:follow_up_questions:session:";
+
+    /**
      * Interview answer request-id key prefix for idempotency.
      */
     private static final String INTERVIEW_ANSWER_REQUEST_KEY = "interview:answer:req:session:";
@@ -283,6 +288,50 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
     }
 
     @Override
+    public void cacheFollowUpQuestion(String sessionId, String questionNumber, String questionContent) {
+        if (StrUtil.isBlank(sessionId) || StrUtil.isBlank(questionNumber) || StrUtil.isBlank(questionContent)) {
+            return;
+        }
+        try {
+            String cacheKey = INTERVIEW_FOLLOW_UP_QUESTIONS_KEY + sessionId;
+            stringRedisTemplate.opsForHash().put(cacheKey, questionNumber.trim(), questionContent.trim());
+            stringRedisTemplate.expire(cacheKey, CACHE_EXPIRE_HOURS, TimeUnit.HOURS);
+            log.info("Cached follow-up question, sessionId: {}, questionNumber: {}", sessionId, questionNumber);
+        } catch (Exception e) {
+            log.error("Failed to cache follow-up question, sessionId: {}, questionNumber: {}", sessionId, questionNumber, e);
+        }
+    }
+
+    @Override
+    public Map<String, String> getSessionFollowUpQuestions(String sessionId) {
+        Map<String, String> followUpQuestionMap = new LinkedHashMap<>();
+        if (StrUtil.isBlank(sessionId)) {
+            return followUpQuestionMap;
+        }
+        try {
+            String cacheKey = INTERVIEW_FOLLOW_UP_QUESTIONS_KEY + sessionId;
+            Map<Object, Object> rawMap = stringRedisTemplate.opsForHash().entries(cacheKey);
+            if (rawMap == null || rawMap.isEmpty()) {
+                return followUpQuestionMap;
+            }
+            rawMap.forEach((key, value) -> {
+                if (key == null || value == null) {
+                    return;
+                }
+                String cachedQuestionNumber = key.toString();
+                String cachedQuestionContent = value.toString();
+                if (StrUtil.isNotBlank(cachedQuestionNumber) && StrUtil.isNotBlank(cachedQuestionContent)) {
+                    followUpQuestionMap.put(cachedQuestionNumber, cachedQuestionContent);
+                }
+            });
+            return followUpQuestionMap;
+        } catch (Exception e) {
+            log.error("Failed to get follow-up questions, sessionId: {}", sessionId, e);
+            return followUpQuestionMap;
+        }
+    }
+
+    @Override
     public Map<String, String> getSessionInterviewSuggestions(String sessionId) {
         try {
             String cacheKey = INTERVIEW_SUGGESTIONS_KEY + sessionId;
@@ -327,6 +376,10 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
         try {
             String cacheKey = INTERVIEW_QUESTIONS_KEY + sessionId;
             Object question = stringRedisTemplate.opsForHash().get(cacheKey, questionNumber);
+            if (question == null) {
+                String followUpCacheKey = INTERVIEW_FOLLOW_UP_QUESTIONS_KEY + sessionId;
+                question = stringRedisTemplate.opsForHash().get(followUpCacheKey, questionNumber);
+            }
             return question != null ? question.toString() : null;
         } catch (Exception e) {
             log.error("闁兼儳鍢茶ぐ鍥紣濡吋绐楀鎯扮簿鐟欙箓鏁嶇仦鑲╃獥閻犲洦鎹: {}, 濡増锚瑜? {}, 闂佹寧鐟ㄩ? {}", sessionId, questionNumber, e.getMessage(), e);
@@ -338,7 +391,8 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
     public void clearSessionQuestions(String sessionId) {
         try {
             String cacheKey = INTERVIEW_QUESTIONS_KEY + sessionId;
-            stringRedisTemplate.delete(cacheKey);
+            String followUpCacheKey = INTERVIEW_FOLLOW_UP_QUESTIONS_KEY + sessionId;
+            stringRedisTemplate.delete(List.of(cacheKey, followUpCacheKey));
             log.info("Cleared interview question cache, sessionId: {}", sessionId);
         } catch (Exception e) {
             log.error("婵炴挸鎳樺▍搴ㄦ閵忥絿妲稿Λ鐗堫焽缁憋妇鈧稒锚閵囨垹鎷归妷顖滅濞村吋淇洪惁绲€D: {}, 闂佹寧鐟ㄩ? {}", sessionId, e.getMessage(), e);
@@ -592,6 +646,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
         InterviewFlowState state = new InterviewFlowState();
         state.setStatus(FLOW_STATUS_INIT);
         state.setCurrentIndex(0);
+        state.setCurrentQuestionNumber("1");
         state.setTotalQuestions(totalQuestions);
         state.setFollowUpCount(0);
         state.setMaxFollowUp(2);
@@ -614,6 +669,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             InterviewFlowState state = new InterviewFlowState();
             state.setStatus(asString(entries.get("status"), FLOW_STATUS_INIT));
             state.setCurrentIndex(asInt(entries.get("currentIndex"), 0));
+            state.setCurrentQuestionNumber(asString(entries.get("currentQuestionNumber"), null));
             state.setTotalQuestions(asInt(entries.get("totalQuestions"), 0));
             state.setFollowUpCount(asInt(entries.get("followUpCount"), 0));
             state.setMaxFollowUp(asInt(entries.get("maxFollowUp"), 2));
@@ -653,6 +709,20 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
     }
 
     @Override
+    public InterviewFlowState startFollowUpQuestion(String sessionId, String questionNumber) {
+        InterviewFlowState state = getInterviewFlow(sessionId);
+        if (state == null || StrUtil.isBlank(questionNumber)) {
+            return null;
+        }
+        state.setFollowUpCount((state.getFollowUpCount() == null ? 0 : state.getFollowUpCount()) + 1);
+        state.setStatus(FLOW_STATUS_FOLLOW_UP);
+        state.setCurrentQuestionNumber(questionNumber.trim());
+        state.setVersion((state.getVersion() == null ? 0 : state.getVersion()) + 1);
+        saveFlowState(sessionId, state);
+        return state;
+    }
+
+    @Override
     public InterviewFlowState advanceToNextQuestion(String sessionId) {
         InterviewFlowState state = getInterviewFlow(sessionId);
         if (state == null) {
@@ -667,9 +737,11 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
         if (totalQuestions <= 0 || nextIndex >= totalQuestions) {
             state.setStatus(FLOW_STATUS_COMPLETED);
             state.setCurrentIndex(Math.max(currentIndex, 0));
+            state.setCurrentQuestionNumber(null);
         } else {
             state.setCurrentIndex(nextIndex);
             state.setStatus(FLOW_STATUS_ASKING);
+            state.setCurrentQuestionNumber(String.valueOf(nextIndex + 1));
         }
 
         state.setVersion((state.getVersion() == null ? 0 : state.getVersion()) + 1);
@@ -684,6 +756,8 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
             return null;
         }
         state.setStatus(FLOW_STATUS_COMPLETED);
+        state.setCurrentQuestionNumber(null);
+        state.setFollowUpCount(0);
         state.setVersion((state.getVersion() == null ? 0 : state.getVersion()) + 1);
         saveFlowState(sessionId, state);
         return state;
@@ -766,6 +840,7 @@ public class InterviewQuestionCacheServiceImpl implements InterviewQuestionCache
         Map<String, String> payload = new HashMap<>();
         payload.put("status", asString(state.getStatus(), FLOW_STATUS_INIT));
         payload.put("currentIndex", String.valueOf(state.getCurrentIndex() == null ? 0 : state.getCurrentIndex()));
+        payload.put("currentQuestionNumber", asString(state.getCurrentQuestionNumber(), ""));
         payload.put("totalQuestions", String.valueOf(state.getTotalQuestions() == null ? 0 : state.getTotalQuestions()));
         payload.put("followUpCount", String.valueOf(state.getFollowUpCount() == null ? 0 : state.getFollowUpCount()));
         payload.put("maxFollowUp", String.valueOf(state.getMaxFollowUp() == null ? 2 : state.getMaxFollowUp()));

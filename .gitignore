@@ -10,6 +10,7 @@ uploads/
 coverage/
 .env
 .env.*
+!.env.example
 
 ### IntelliJ IDEA ###
 .idea
@@ -43,3 +44,12 @@ build/
 ### Mac OS ###
 .DS_Store
 Thumbs.db
+docs/project-architecture-diagram.html
+docs/campus-backend-resume-project-experience-zh.md
+docs/current-service-api-by-module-zh.md
+docs/interview-follow-up-design-zh.md
+docs/interview-main-flow-difficulties-zh.md
+docs/project-module-functional-design-zh.md
+docs/project-storage-architecture-diagram.html
+docs/project-storage-design-zh.md
+docs/project-tech-stack-and-versions-zh.md

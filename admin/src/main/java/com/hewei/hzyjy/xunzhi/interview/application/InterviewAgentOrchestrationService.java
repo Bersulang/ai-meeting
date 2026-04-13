@@ -6,6 +6,7 @@ import com.hewei.hzyjy.xunzhi.interview.api.io.req.InterviewAnswerReqDTO;
 import com.hewei.hzyjy.xunzhi.interview.api.io.req.InterviewQuestionReqDTO;
 import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewAnswerRespDTO;
 import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewQuestionRespDTO;
+import com.hewei.hzyjy.xunzhi.interview.application.flow.InterviewFlowStateMachine;
 import com.hewei.hzyjy.xunzhi.interview.application.pipeline.InterviewAnswerPipeline;
 import com.hewei.hzyjy.xunzhi.interview.service.InterviewQuestionCacheService;
 import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewFlowState;
@@ -18,7 +19,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 面试主编排服务（纯主问题流程，不包含语音转写和追问分支）�?
+ * Interview orchestration service, including main-question and follow-up restoration.
  */
 @Service
 @RequiredArgsConstructor
@@ -29,17 +30,12 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
     private final InterviewQuestionExtractionService interviewQuestionExtractionService;
     private final InterviewDemeanorService interviewDemeanorService;
     private final InterviewAnswerPipeline interviewAnswerPipeline;
+    private final InterviewFlowStateMachine interviewFlowStateMachine;
 
     public InterviewQuestionRespDTO extractInterviewQuestions(InterviewQuestionReqDTO reqDTO) {
         return interviewQuestionExtractionService.extractInterviewQuestions(reqDTO);
     }
 
-    /**
-     * 用户提交回答后的核心链路�?
-     * 1) 读取当前主问�?
-     * 2) 调评分官工作流评�?
-     * 3) 推进到下一道主问题或结�?
-     */
     public InterviewAnswerRespDTO answerInterviewQuestion(String sessionId, InterviewAnswerReqDTO requestParam) {
         return interviewAnswerPipeline.execute(sessionId, requestParam);
     }
@@ -76,8 +72,9 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
                     return response.finish().success();
                 }
                 if (recoveredState.hasQuestion()) {
+                    flowState = restoreFlowToQuestion(sessionId, recoveredState.questionNumber, questions.size());
                     fillCurrentQuestionResponse(sessionId, response,
-                            recoveredState.questionNumber, recoveredState.questionContent);
+                            recoveredState.questionNumber, recoveredState.questionContent, flowState);
                     return response.success();
                 }
 
@@ -88,25 +85,18 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
             if (flowState == null) {
                 return response.fail("interview flow not initialized");
             }
-            if (flowState.isCompleted()) {
+            if (flowState.isCompleted() || interviewFlowStateMachine.isOutOfRange(flowState)) {
                 response.setTotalScore(interviewQuestionCacheService.getSessionTotalScore(sessionId));
                 return response.finish().success();
             }
 
-            int currentIndex = flowState.getCurrentIndex() == null ? 0 : flowState.getCurrentIndex();
-            if (currentIndex < 0) {
-                currentIndex = 0;
-            }
-            if (!questions.isEmpty() && currentIndex >= questions.size()) {
-                currentIndex = questions.size() - 1;
-            }
-            String questionNumber = String.valueOf(currentIndex + 1);
+            String questionNumber = interviewFlowStateMachine.currentQuestionNumber(flowState);
             String questionContent = resolveQuestionByNumber(sessionId, questionNumber, questions);
             if (StrUtil.isBlank(questionContent)) {
                 return response.fail("question does not exist or expired");
             }
 
-            fillCurrentQuestionResponse(sessionId, response, questionNumber, questionContent);
+            fillCurrentQuestionResponse(sessionId, response, questionNumber, questionContent, flowState);
             return response.success();
         } catch (Exception e) {
             log.error("Failed to get current question, sessionId: {}", sessionId, e);
@@ -122,9 +112,15 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
             String sessionId,
             InterviewAnswerRespDTO response,
             String questionNumber,
-            String questionContent) {
+            String questionContent,
+            InterviewFlowState flowState) {
         response.withCurrentQuestion(questionNumber, questionContent);
-        response.withNextQuestion(questionNumber, questionContent, false, 0);
+        response.withNextQuestion(
+                questionNumber,
+                questionContent,
+                isFollowUpQuestion(questionNumber),
+                resolveFollowUpCount(flowState, questionNumber)
+        );
         response.setTotalScore(interviewQuestionCacheService.getSessionTotalScore(sessionId));
     }
 
@@ -178,7 +174,7 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
 
         String nextQuestionFromTurn = latestTurn.getNextQuestion();
         if (StrUtil.isNotBlank(nextQuestionFromTurn)) {
-            String matchedQuestionNumber = matchQuestionNumberByContent(nextQuestionFromTurn, questions);
+            String matchedQuestionNumber = matchQuestionNumberByContent(sessionId, nextQuestionFromTurn, questions);
             if (StrUtil.isNotBlank(matchedQuestionNumber)) {
                 String matchedQuestionContent = resolveQuestionByNumber(sessionId, matchedQuestionNumber, questions);
                 if (StrUtil.isNotBlank(matchedQuestionContent)) {
@@ -187,7 +183,7 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
             }
         }
 
-        Integer answeredQuestionNo = parsePositiveInt(normalizeQuestionNumber(latestTurn.getQuestionNumber()));
+        Integer answeredQuestionNo = extractMainQuestionNo(normalizeQuestionNumber(latestTurn.getQuestionNumber()));
         if (answeredQuestionNo != null) {
             int candidateQuestionNo = answeredQuestionNo + 1;
             if (questions != null && !questions.isEmpty() && candidateQuestionNo <= questions.size()) {
@@ -200,6 +196,47 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         }
 
         return CurrentQuestionState.empty();
+    }
+
+    private InterviewFlowState restoreFlowToQuestion(String sessionId, String questionNumber, int totalQuestions) {
+        if (StrUtil.isBlank(sessionId) || StrUtil.isBlank(questionNumber) || totalQuestions <= 0) {
+            return null;
+        }
+        InterviewFlowState existingFlowState = interviewQuestionCacheService.getInterviewFlow(sessionId);
+        if (existingFlowState != null) {
+            return existingFlowState;
+        }
+
+        interviewQuestionCacheService.initInterviewFlow(sessionId, totalQuestions);
+        Integer mainQuestionNo = extractMainQuestionNo(questionNumber);
+        if (mainQuestionNo == null || mainQuestionNo <= 0) {
+            return interviewQuestionCacheService.getInterviewFlow(sessionId);
+        }
+
+        int targetMainQuestionNo = Math.min(mainQuestionNo, totalQuestions);
+        for (int currentMainQuestionNo = 1; currentMainQuestionNo < targetMainQuestionNo; currentMainQuestionNo++) {
+            InterviewFlowState advancedFlow = interviewFlowStateMachine.advanceMainQuestion(sessionId);
+            if (advancedFlow == null || interviewFlowStateMachine.isCompleted(advancedFlow)) {
+                return advancedFlow;
+            }
+        }
+
+        if (isFollowUpQuestion(questionNumber)) {
+            int followUpCount = extractFollowUpCount(questionNumber);
+            for (int index = 0; index < followUpCount; index++) {
+                interviewFlowStateMachine.startFollowUpQuestion(sessionId, questionNumber);
+            }
+        }
+        return interviewQuestionCacheService.getInterviewFlow(sessionId);
+    }
+
+    private String matchQuestionNumberByContent(String sessionId, String questionContent, Map<String, String> questions) {
+        String matchedMainQuestionNumber = matchQuestionNumberByContent(questionContent, questions);
+        if (StrUtil.isNotBlank(matchedMainQuestionNumber)) {
+            return matchedMainQuestionNumber;
+        }
+        Map<String, String> followUpQuestions = interviewQuestionCacheService.getSessionFollowUpQuestions(sessionId);
+        return matchQuestionNumberByContent(questionContent, followUpQuestions);
     }
 
     private String matchQuestionNumberByContent(String questionContent, Map<String, String> questions) {
@@ -228,6 +265,56 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         } catch (Exception ex) {
             return null;
         }
+    }
+
+    private Integer extractMainQuestionNo(String questionNumber) {
+        String mainQuestionNumber = resolveMainQuestionNumber(questionNumber);
+        return parsePositiveInt(mainQuestionNumber);
+    }
+
+    private Integer resolveFollowUpCount(InterviewFlowState flowState, String questionNumber) {
+        if (!isFollowUpQuestion(questionNumber)) {
+            return 0;
+        }
+        int parsedFollowUpCount = extractFollowUpCount(questionNumber);
+        if (parsedFollowUpCount > 0) {
+            return parsedFollowUpCount;
+        }
+        if (flowState != null && flowState.getFollowUpCount() != null) {
+            return Math.max(flowState.getFollowUpCount(), 0);
+        }
+        return 0;
+    }
+
+    private boolean isFollowUpQuestion(String questionNumber) {
+        return StrUtil.isNotBlank(questionNumber) && questionNumber.trim().matches("\\d+-F\\d+");
+    }
+
+    private int extractFollowUpCount(String questionNumber) {
+        if (!isFollowUpQuestion(questionNumber)) {
+            return 0;
+        }
+        int separatorIndex = questionNumber.indexOf("-F");
+        if (separatorIndex < 0 || separatorIndex + 2 >= questionNumber.length()) {
+            return 0;
+        }
+        try {
+            return Math.max(Integer.parseInt(questionNumber.substring(separatorIndex + 2).trim()), 0);
+        } catch (Exception ex) {
+            return 0;
+        }
+    }
+
+    private String resolveMainQuestionNumber(String questionNumber) {
+        if (StrUtil.isBlank(questionNumber)) {
+            return null;
+        }
+        String normalized = questionNumber.trim();
+        int separatorIndex = normalized.indexOf("-F");
+        if (separatorIndex > 0) {
+            return normalized.substring(0, separatorIndex);
+        }
+        return normalized;
     }
 
     private String normalizeQuestionNumber(String questionNumber) {
@@ -273,5 +360,3 @@ public class InterviewAgentOrchestrationService implements InterviewWorkflowServ
         }
     }
 }
-
-

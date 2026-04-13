@@ -76,6 +76,9 @@ public class InterviewFlowStateMachine {
         if (state == null || isOutOfRange(state)) {
             return null;
         }
+        if (StrUtil.isNotBlank(state.getCurrentQuestionNumber())) {
+            return state.getCurrentQuestionNumber().trim();
+        }
         int currentIndex = state.getCurrentIndex() == null ? 0 : Math.max(0, state.getCurrentIndex());
         return String.valueOf(currentIndex + 1);
     }
@@ -86,6 +89,19 @@ public class InterviewFlowStateMachine {
 
     public InterviewFlowState moveToFollowUp(String sessionId) {
         return transitionStatus(sessionId, InterviewFlowStatus.FOLLOW_UP);
+    }
+
+    public InterviewFlowState startFollowUpQuestion(String sessionId, String questionNumber) {
+        InterviewFlowState currentState = current(sessionId);
+        if (currentState == null) {
+            return null;
+        }
+        InterviewFlowStatus currentStatus = toStatus(currentState);
+        if (!isLegalTransition(currentStatus, InterviewFlowStatus.FOLLOW_UP)
+                && currentStatus != InterviewFlowStatus.FOLLOW_UP) {
+            throw illegalTransition(currentStatus, InterviewFlowStatus.FOLLOW_UP);
+        }
+        return interviewQuestionCacheService.startFollowUpQuestion(sessionId, questionNumber);
     }
 
     public InterviewFlowState markCompleted(String sessionId) {

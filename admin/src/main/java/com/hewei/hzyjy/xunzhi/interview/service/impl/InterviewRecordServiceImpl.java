@@ -677,6 +677,9 @@ public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMappe
             item.setScore(turn.getScore());
             item.setFeedback(turn.getFeedback());
             item.setTotalScore(turn.getTotalScore());
+            item.setFollowUpNeeded(turn.getFollowUpNeeded());
+            item.setIsFollowUp(turn.getIsFollowUp());
+            item.setFollowUpCount(turn.getFollowUpCount());
             item.setNextQuestionNumber(turn.getNextQuestionNumber());
             item.setNextQuestion(turn.getNextQuestion());
             item.setFinished(turn.getFinished());

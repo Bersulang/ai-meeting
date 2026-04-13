@@ -33,7 +33,7 @@ public class AverageInterviewScoreAggregatorStrategy implements InterviewScoreAg
         int scoreSum = 0;
         int scoredTurns = 0;
         for (InterviewTurnLog turn : turns) {
-            if (turn == null || turn.getScore() == null) {
+            if (turn == null || turn.getScore() == null || Boolean.TRUE.equals(turn.getIsFollowUp())) {
                 continue;
             }
             scoreSum += clampScore(turn.getScore());
