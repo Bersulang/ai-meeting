@@ -28,6 +28,7 @@
     <webmagic.version>1.0.3</webmagic.version>
     <easyexcel.version>3.1.3</easyexcel.version>
     <spotless-maven-plugin.version>2.22.1</spotless-maven-plugin.version>
+    <liteflow.version>2.15.3.2</liteflow.version>
   </properties>
 
   <dependencyManagement>
@@ -44,6 +45,14 @@
         <groupId>org.springframework.cloud</groupId>
         <artifactId>spring-cloud-dependencies</artifactId>
         <version>${spring-cloud.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+
+      <dependency>
+        <groupId>com.yomahub</groupId>
+        <artifactId>liteflow-spring-boot-starter</artifactId>
+        <version>${liteflow.version}</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>

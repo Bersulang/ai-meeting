@@ -3,6 +3,7 @@ package com.hewei.hzyjy.xunzhi.streamingMedia.service;
 import com.alibaba.fastjson2.JSONObject;
 import com.hewei.hzyjy.xunzhi.common.config.storage.ApplicationStorageProperties;
 import com.hewei.hzyjy.xunzhi.common.config.xunfei.XunfeiLatProperties;
+import com.hewei.hzyjy.xunzhi.media.infrastructure.integration.XunfeiAudioService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 

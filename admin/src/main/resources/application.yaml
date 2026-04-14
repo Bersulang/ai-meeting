@@ -4,6 +4,8 @@ server:
 spring:
   application:
     name: xunzhi-agent-admin
+  config:
+    import: optional:classpath:interview-followup-rule.yaml
   profiles:
     include: satoken,sse
   servlet:
@@ -101,6 +103,12 @@ xunzhi-agent:
     enable: true
     time-window-seconds: 1
     max-access-count: 20
+  interview:
+    answer-guard:
+      lock-expire-seconds: 120
+      processing-expire-seconds: 120
+      replay-expire-hours: 24
+      lock-wait-millis: 0
   redis-session:
     enable: true
     message-expire-seconds: 604800

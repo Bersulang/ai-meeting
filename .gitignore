@@ -1,4 +1,6 @@
 target/
+.m2/
+.mvn/wrapper/dists/
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/

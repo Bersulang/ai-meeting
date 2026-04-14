@@ -1,6 +1,7 @@
 package com.hewei.hzyjy.xunzhi.interview.application.pipeline;
 
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.crypto.digest.DigestUtil;
 import com.hewei.hzyjy.xunzhi.agent.application.BusinessAgentResolver;
 import com.hewei.hzyjy.xunzhi.agent.application.BusinessAgentScene;
 import com.hewei.hzyjy.xunzhi.agent.dao.entity.AgentPropertiesDO;
@@ -10,13 +11,18 @@ import com.hewei.hzyjy.xunzhi.interview.application.InterviewEvaluationService;
 import com.hewei.hzyjy.xunzhi.interview.application.InterviewFollowUpService;
 import com.hewei.hzyjy.xunzhi.interview.application.InterviewResponseParser;
 import com.hewei.hzyjy.xunzhi.interview.application.flow.InterviewFlowStateMachine;
+import com.hewei.hzyjy.xunzhi.interview.application.rule.InterviewFollowUpRuleContext;
+import com.hewei.hzyjy.xunzhi.interview.application.rule.InterviewFollowUpRuleDecision;
+import com.hewei.hzyjy.xunzhi.interview.application.rule.InterviewFollowUpRuleService;
 import com.hewei.hzyjy.xunzhi.interview.service.InterviewQuestionCacheService;
 import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewFlowState;
 import com.hewei.hzyjy.xunzhi.interview.service.model.InterviewTurnLog;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RLock;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.Map;
 
 @Component
@@ -24,12 +30,18 @@ import java.util.Map;
 @Slf4j
 public class InterviewAnswerPipeline {
 
+    private static final String PROCESSING_MESSAGE = "current request is processing, please retry later";
+    private static final String QUESTION_LOCK_MESSAGE = "current question is processing, please retry later";
+
     private final BusinessAgentResolver businessAgentResolver;
     private final InterviewQuestionCacheService interviewQuestionCacheService;
     private final InterviewEvaluationService interviewEvaluationService;
     private final InterviewFollowUpService interviewFollowUpService;
     private final InterviewResponseParser interviewResponseParser;
     private final InterviewFlowStateMachine interviewFlowStateMachine;
+    private final InterviewAnswerIdempotencyService interviewAnswerIdempotencyService;
+    private final InterviewQuestionLockService interviewQuestionLockService;
+    private final InterviewFollowUpRuleService interviewFollowUpRuleService;
 
     public InterviewAnswerRespDTO execute(String sessionId, InterviewAnswerReqDTO requestParam) {
         InterviewAnswerPipelineContext ctx = new InterviewAnswerPipelineContext();
@@ -41,11 +53,15 @@ public class InterviewAnswerPipeline {
             if (!validateRequest(ctx)) {
                 return ctx.response;
             }
+            normalizeRequestId(ctx);
             if (!stepIdempotency(ctx)) {
                 return ctx.response;
             }
-            if (!stepLoadCurrentQuestion(ctx)) {
+            if (!stepAcquireQuestionLock(ctx)) {
                 return ctx.response;
+            }
+            if (!stepLoadCurrentQuestion(ctx)) {
+                return finishAndReturn(ctx, false);
             }
             if (!stepEvaluateAndScore(ctx)) {
                 return ctx.response;
@@ -53,12 +69,32 @@ public class InterviewAnswerPipeline {
             if (!stepAdvanceFlowAndAssemble(ctx)) {
                 return ctx.response;
             }
-            stepAppendTurnLog(ctx);
+            return finishAndReturn(ctx, true);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            log.warn("Interrupted while executing interview answer pipeline, sessionId: {}", sessionId);
+            ctx.response.fail("interview answer request interrupted");
             return ctx.response;
         } catch (Exception ex) {
             log.error("Failed to execute interview answer pipeline, sessionId: {}", sessionId, ex);
             return ctx.response.fail("failed to process answer: " + ex.getMessage());
+        } finally {
+            interviewQuestionLockService.release(ctx.questionLock);
+            if (ctx.idempotencyStarted && !ctx.idempotencyMarkedSucceeded) {
+                interviewAnswerIdempotencyService.clearProcessing(ctx.sessionId, ctx.requestId);
+            }
         }
+    }
+
+    private InterviewAnswerRespDTO finishAndReturn(InterviewAnswerPipelineContext ctx, boolean appendTurn) {
+        if (Boolean.TRUE.equals(ctx.response.getIsSuccess())) {
+            interviewAnswerIdempotencyService.markSucceeded(ctx.sessionId, ctx.requestId, ctx.response);
+            ctx.idempotencyMarkedSucceeded = true;
+            if (appendTurn) {
+                stepAppendTurnLog(ctx);
+            }
+        }
+        return ctx.response;
     }
 
     private boolean validateRequest(InterviewAnswerPipelineContext ctx) {
@@ -78,21 +114,58 @@ public class InterviewAnswerPipeline {
             ctx.response.fail("answer content cannot be empty");
             return false;
         }
-        ctx.requestId = ctx.requestParam.getRequestId();
         return true;
     }
 
-    private boolean stepIdempotency(InterviewAnswerPipelineContext ctx) {
-        if (interviewQuestionCacheService.markAnswerRequestProcessed(ctx.sessionId, ctx.requestId)) {
-            return true;
+    private void normalizeRequestId(InterviewAnswerPipelineContext ctx) {
+        String requestId = ctx.requestParam.getRequestId();
+        if (StrUtil.isBlank(requestId)) {
+            String seed = ctx.sessionId + "|" + ctx.requestParam.getQuestionNumber().trim() + "|" + ctx.requestParam.getAnswerContent();
+            requestId = "auto-" + DigestUtil.sha256Hex(seed).substring(0, 32);
+            ctx.requestParam.setRequestId(requestId);
+        } else {
+            requestId = requestId.trim();
+            ctx.requestParam.setRequestId(requestId);
         }
+        ctx.requestId = requestId;
+    }
 
-        ctx.response.setTotalScore(interviewQuestionCacheService.getSessionTotalScore(ctx.sessionId));
-        fillNextQuestionFromFlow(ctx.sessionId, ctx.response);
-        if (StrUtil.isBlank(ctx.response.getErrorMessage())) {
-            ctx.response.success();
+    private boolean stepIdempotency(InterviewAnswerPipelineContext ctx) {
+        InterviewAnswerIdempotencyService.TryStartResult tryStartResult =
+                interviewAnswerIdempotencyService.tryStart(ctx.sessionId, ctx.requestId);
+        switch (tryStartResult.getStatus()) {
+            case SUCCEEDED -> {
+                InterviewAnswerRespDTO replayResponse = tryStartResult.getReplayResponse();
+                if (replayResponse != null) {
+                    ctx.response = replayResponse;
+                    return false;
+                }
+                ctx.response.fail(PROCESSING_MESSAGE);
+                return false;
+            }
+            case PROCESSING -> {
+                ctx.response.fail(PROCESSING_MESSAGE);
+                return false;
+            }
+            case NEW -> {
+                ctx.idempotencyStarted = true;
+                return true;
+            }
+            default -> {
+                ctx.response.fail(PROCESSING_MESSAGE);
+                return false;
+            }
         }
-        return false;
+    }
+
+    private boolean stepAcquireQuestionLock(InterviewAnswerPipelineContext ctx) throws InterruptedException {
+        RLock questionLock = interviewQuestionLockService.acquire(ctx.sessionId, ctx.requestParam.getQuestionNumber());
+        if (questionLock == null) {
+            ctx.response.fail(QUESTION_LOCK_MESSAGE);
+            return false;
+        }
+        ctx.questionLock = questionLock;
+        return true;
     }
 
     private boolean stepLoadCurrentQuestion(InterviewAnswerPipelineContext ctx) {
@@ -157,6 +230,7 @@ public class InterviewAnswerPipeline {
 
         ctx.followUpNeeded = interviewResponseParser.asBoolean(evaluationResult.get("follow_up_needed"));
         ctx.followUpQuestion = sanitizeFollowUpQuestion(interviewResponseParser.asString(evaluationResult.get("follow_up_question")));
+        ctx.missingPoints = interviewResponseParser.asStringList(evaluationResult.get("missing_points"));
 
         Integer totalScore = Boolean.TRUE.equals(ctx.currentIsFollowUp)
                 ? interviewQuestionCacheService.getSessionTotalScore(ctx.sessionId)
@@ -168,7 +242,29 @@ public class InterviewAnswerPipeline {
     }
 
     private boolean stepAdvanceFlowAndAssemble(InterviewAnswerPipelineContext ctx) {
-        if (ctx.followUpNeeded && ctx.currentFollowUpCount < ctx.maxFollowUp) {
+        InterviewFollowUpRuleDecision ruleDecision = decideFollowUp(ctx);
+        int resolvedMaxFollowUp = ruleDecision != null && ruleDecision.getResolvedMaxFollowUp() > 0
+                ? ruleDecision.getResolvedMaxFollowUp()
+                : ctx.maxFollowUp;
+        boolean needFollowUp = ruleDecision != null
+                ? ruleDecision.isNeedFollowUp()
+                : Boolean.TRUE.equals(ctx.followUpNeeded);
+
+        log.info(
+                "Follow-up rule decision, sessionId={}, requestId={}, questionNumber={}, chainId={}, reasonCode={}, reasonText={}, ruleVersion={}, needFollowUp={}, resolvedMaxFollowUp={}, fallback={}",
+                ctx.sessionId,
+                ctx.requestId,
+                ctx.currentQuestionNumber,
+                ruleDecision == null ? null : ruleDecision.getChainId(),
+                ruleDecision == null ? null : ruleDecision.getReasonCode(),
+                ruleDecision == null ? null : ruleDecision.getReasonText(),
+                ruleDecision == null ? null : ruleDecision.getRuleVersion(),
+                needFollowUp,
+                resolvedMaxFollowUp,
+                ruleDecision != null && ruleDecision.isFallback()
+        );
+
+        if (needFollowUp && ctx.currentFollowUpCount < resolvedMaxFollowUp) {
             InterviewFollowUpService.FollowUpQuestionResult followUpQuestionResult = interviewFollowUpService.generateFollowUpQuestion(
                     ctx.sessionId,
                     ctx.requestId,
@@ -177,7 +273,7 @@ public class InterviewAnswerPipeline {
                     ctx.requestParam.getAnswerContent(),
                     ctx.followUpQuestion,
                     ctx.currentFollowUpCount,
-                    ctx.maxFollowUp
+                    resolvedMaxFollowUp
             );
             if (followUpQuestionResult.hasQuestion()) {
                 interviewQuestionCacheService.cacheFollowUpQuestion(
@@ -218,6 +314,24 @@ public class InterviewAnswerPipeline {
 
         ctx.response.withNextQuestion(nextQuestionNumber, nextQuestion, false, 0).success();
         return true;
+    }
+
+    private InterviewFollowUpRuleDecision decideFollowUp(InterviewAnswerPipelineContext ctx) {
+        InterviewFollowUpRuleContext ruleContext = new InterviewFollowUpRuleContext();
+        ruleContext.setSessionId(ctx.sessionId);
+        ruleContext.setRequestId(ctx.requestId);
+        ruleContext.setQuestionNumber(ctx.currentQuestionNumber);
+        ruleContext.setInterviewType(interviewQuestionCacheService.getSessionInterviewDirection(ctx.sessionId));
+        ruleContext.setFollowUpQuestion(Boolean.TRUE.equals(ctx.currentIsFollowUp));
+        ruleContext.setFollowUpCount(ctx.currentFollowUpCount == null ? 0 : Math.max(ctx.currentFollowUpCount, 0));
+        ruleContext.setMaxFollowUp(ctx.maxFollowUp == null ? 2 : Math.max(ctx.maxFollowUp, 1));
+        ruleContext.setScore(ctx.score);
+        ruleContext.setFollowUpNeededFromAi(Boolean.TRUE.equals(ctx.followUpNeeded));
+        ruleContext.setMissingPoints(ctx.missingPoints);
+        ruleContext.setFollowUpQuestionHint(ctx.followUpQuestion);
+        ruleContext.setInterviewCompleted(Boolean.TRUE.equals(ctx.response.getFinished()));
+        ctx.followUpRuleDecision = interviewFollowUpRuleService.decide(ruleContext);
+        return ctx.followUpRuleDecision;
     }
 
     private void stepAppendTurnLog(InterviewAnswerPipelineContext ctx) {
@@ -295,26 +409,6 @@ public class InterviewAnswerPipeline {
         return interviewFlowStateMachine.current(sessionId);
     }
 
-    private void fillNextQuestionFromFlow(String sessionId, InterviewAnswerRespDTO response) {
-        InterviewFlowState state = interviewFlowStateMachine.current(sessionId);
-        if (state == null || interviewFlowStateMachine.isCompleted(state) || interviewFlowStateMachine.isOutOfRange(state)) {
-            response.finish();
-            return;
-        }
-        String questionNumber = interviewFlowStateMachine.currentQuestionNumber(state);
-        String nextQuestion = getQuestionWithReload(sessionId, questionNumber);
-        if (StrUtil.isBlank(nextQuestion)) {
-            response.fail("question does not exist or expired");
-            return;
-        }
-        response.withNextQuestion(
-                questionNumber,
-                nextQuestion,
-                isFollowUpQuestion(questionNumber),
-                resolveFollowUpCount(state, questionNumber)
-        );
-    }
-
     private String getQuestionWithReload(String sessionId, String questionNumber) {
         if (StrUtil.isBlank(questionNumber)) {
             return null;
@@ -389,10 +483,10 @@ public class InterviewAnswerPipeline {
             return null;
         }
         String normalized = question.trim();
-        if ("无".equals(normalized)
-                || "none".equalsIgnoreCase(normalized)
+        if ("none".equalsIgnoreCase(normalized)
                 || "null".equalsIgnoreCase(normalized)
-                || "__FINISH__".equalsIgnoreCase(normalized)) {
+                || "__FINISH__".equalsIgnoreCase(normalized)
+                || "无".equals(normalized)) {
             return null;
         }
         return normalized;
@@ -420,5 +514,10 @@ public class InterviewAnswerPipeline {
         private Integer totalScore;
         private Boolean followUpNeeded;
         private String followUpQuestion;
+        private List<String> missingPoints;
+        private InterviewFollowUpRuleDecision followUpRuleDecision;
+        private boolean idempotencyStarted;
+        private boolean idempotencyMarkedSucceeded;
+        private RLock questionLock;
     }
 }

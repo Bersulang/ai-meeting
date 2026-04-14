@@ -3,8 +3,9 @@ package com.hewei.hzyjy.xunzhi.streamingMedia.service;
 import com.alibaba.fastjson2.JSONObject;
 import com.hewei.hzyjy.xunzhi.common.config.xunfei.XunfeiLatProperties;
 import com.hewei.hzyjy.xunzhi.common.convention.exception.ClientException;
-import com.hewei.hzyjy.xunzhi.streamingMedia.controller.io.req.LongTextTtsReqDTO;
-import com.hewei.hzyjy.xunzhi.streamingMedia.controller.io.resp.LongTextTtsTaskRespDTO;
+import com.hewei.hzyjy.xunzhi.media.api.io.req.LongTextTtsReqDTO;
+import com.hewei.hzyjy.xunzhi.media.api.io.resp.LongTextTtsTaskRespDTO;
+import com.hewei.hzyjy.xunzhi.media.infrastructure.integration.XunfeiLongTextTtsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
