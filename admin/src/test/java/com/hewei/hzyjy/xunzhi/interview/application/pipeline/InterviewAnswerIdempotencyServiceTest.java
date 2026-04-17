@@ -2,6 +2,7 @@ package com.hewei.hzyjy.xunzhi.interview.application.pipeline;
 
 import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewAnswerRespDTO;
 import com.hewei.hzyjy.xunzhi.interview.config.InterviewAnswerGuardConfiguration;
+import com.hewei.hzyjy.xunzhi.interview.flow.answer.InterviewAnswerIdempotencyService;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;

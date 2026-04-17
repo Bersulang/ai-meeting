@@ -1,5 +1,6 @@
 package com.hewei.hzyjy.xunzhi.interview.application;
 
+import com.hewei.hzyjy.xunzhi.interview.shared.InterviewResponseParser;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
