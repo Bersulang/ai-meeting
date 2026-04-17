@@ -96,7 +96,6 @@ public class InterviewQuestionExtractionService {
             log.warn("Interview question extraction guarded failure, sessionId={}, code={}, message={}",
                     reqDTO.getSessionId(), e.getErrorCode(), e.getMessage());
             try {
-                reqDTO.setResumeFileUrl(null);
                 interviewQuestionService.createFromAIResponse(
                         reqDTO,
                         "{\"error\":\"" + e.getMessage() + "\"}",
@@ -113,7 +112,6 @@ public class InterviewQuestionExtractionService {
             long responseTime = System.currentTimeMillis() - startTime;
             log.error("Interview question extraction failed: {}", e.getMessage(), e);
             try {
-                reqDTO.setResumeFileUrl(null);
                 interviewQuestionService.createFromAIResponse(
                         reqDTO,
                         "{\"error\":\"" + e.getMessage() + "\"}",

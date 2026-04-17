@@ -54,7 +54,7 @@ public class InterviewDemeanorService {
             if (heavyLock == null) {
                 throw new ClientException(
                         "AI_OVERLOADED: demeanor evaluation is processing, please retry",
-                        InterviewErrorCodeEnum.DEMEANOR_EVALUATION_FAILED
+                        InterviewErrorCodeEnum.AI_OVERLOADED
                 );
             }
 

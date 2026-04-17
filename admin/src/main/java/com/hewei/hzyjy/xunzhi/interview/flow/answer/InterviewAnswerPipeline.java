@@ -286,12 +286,9 @@ public class InterviewAnswerPipeline {
         ctx.followUpQuestion = sanitizeFollowUpQuestion(interviewResponseParser.asString(evaluationResult.get("follow_up_question")));
         ctx.missingPoints = interviewResponseParser.asStringList(evaluationResult.get("missing_points"));
 
-        Integer totalScore = Boolean.TRUE.equals(ctx.currentIsFollowUp)
-                ? interviewQuestionCacheService.getSessionTotalScore(ctx.sessionId)
-                : interviewQuestionCacheService.addSessionScore(ctx.sessionId, score);
         ctx.score = score;
-        ctx.totalScore = totalScore;
-        ctx.response.withEvaluation(score, interviewResponseParser.asString(evaluationResult.get("feedback")), totalScore);
+        ctx.totalScore = interviewQuestionCacheService.getSessionTotalScore(ctx.sessionId);
+        ctx.response.withEvaluation(score, interviewResponseParser.asString(evaluationResult.get("feedback")), ctx.totalScore);
         return true;
     }
 
@@ -342,6 +339,9 @@ public class InterviewAnswerPipeline {
                 Integer nextFollowUpCount = followUpFlow != null && followUpFlow.getFollowUpCount() != null
                         ? followUpFlow.getFollowUpCount()
                         : followUpQuestionResult.getFollowUpCount();
+                if (!commitScoreAtSuccess(ctx)) {
+                    return false;
+                }
                 ctx.response.withNextQuestion(
                         followUpQuestionResult.getQuestionNumber(),
                         followUpQuestionResult.getQuestionContent(),
@@ -355,6 +355,9 @@ public class InterviewAnswerPipeline {
         InterviewFlowState nextFlow = interviewFlowStateMachine.advanceMainQuestion(ctx.sessionId);
         if (nextFlow == null || interviewFlowStateMachine.isCompleted(nextFlow)) {
             interviewFlowStateMachine.markCompleted(ctx.sessionId);
+            if (!commitScoreAtSuccess(ctx)) {
+                return false;
+            }
             ctx.response.finish().success();
             return true;
         }
@@ -366,8 +369,27 @@ public class InterviewAnswerPipeline {
             return false;
         }
 
+        if (!commitScoreAtSuccess(ctx)) {
+            return false;
+        }
         ctx.response.withNextQuestion(nextQuestionNumber, nextQuestion, false, 0).success();
         return true;
+    }
+
+    private boolean commitScoreAtSuccess(InterviewAnswerPipelineContext ctx) {
+        try {
+            Integer committedTotalScore = Boolean.TRUE.equals(ctx.currentIsFollowUp)
+                    ? interviewQuestionCacheService.getSessionTotalScore(ctx.sessionId)
+                    : interviewQuestionCacheService.addSessionScore(ctx.sessionId, ctx.score);
+            ctx.totalScore = committedTotalScore;
+            ctx.response.setTotalScore(committedTotalScore);
+            return true;
+        } catch (Exception ex) {
+            log.error("Failed to commit interview score, sessionId={}, requestId={}", ctx.sessionId, ctx.requestId, ex);
+            recordAnswerPipelineFailure("score_commit_failed");
+            ctx.response.fail("failed to commit interview score");
+            return false;
+        }
     }
 
     private InterviewFollowUpRuleDecision decideFollowUp(InterviewAnswerPipelineContext ctx) {
@@ -562,4 +584,3 @@ public class InterviewAnswerPipeline {
         private RLock questionLock;
     }
 }
-
