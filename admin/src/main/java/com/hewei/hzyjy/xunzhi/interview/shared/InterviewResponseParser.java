@@ -260,7 +260,10 @@ public class InterviewResponseParser {
             return null;
         }
 
-        Map<String, Object> map = parsed.toJavaObject(Map.class);
+        Map<String, Object> map = InterviewJsonValueNormalizer.asMap(parsed);
+        if (map == null) {
+            return null;
+        }
         Map<String, Object> unwrapped = unwrapJsonFieldMap(map);
         return unwrapped == null ? map : unwrapped;
     }
@@ -307,7 +310,7 @@ public class InterviewResponseParser {
 
         Object jsonField = parsed.get("json");
         if (jsonField instanceof JSONObject) {
-            return ((JSONObject) jsonField).toJavaObject(Map.class);
+            return InterviewJsonValueNormalizer.asMap(jsonField);
         }
         if (jsonField instanceof Map) {
             @SuppressWarnings("unchecked")
@@ -320,7 +323,7 @@ public class InterviewResponseParser {
 
         try {
             JSONObject inner = JSON.parseObject((String) jsonField);
-            return inner == null ? null : inner.toJavaObject(Map.class);
+            return inner == null ? null : InterviewJsonValueNormalizer.asMap(inner);
         } catch (Exception ignored) {
             return null;
         }
@@ -357,11 +360,11 @@ public class InterviewResponseParser {
         }
 
         if (candidate instanceof JSONObject jsonObject) {
-            return findFirstObjectContainingKeys(jsonObject.toJavaObject(Map.class), targetKeys);
+            return findFirstObjectContainingKeys(InterviewJsonValueNormalizer.asMap(jsonObject), targetKeys);
         }
 
         if (candidate instanceof JSONArray jsonArray) {
-            return findFirstObjectContainingKeys(jsonArray.toJavaObject(List.class), targetKeys);
+            return findFirstObjectContainingKeys(InterviewJsonValueNormalizer.asList(jsonArray), targetKeys);
         }
 
         if (candidate instanceof String text) {
