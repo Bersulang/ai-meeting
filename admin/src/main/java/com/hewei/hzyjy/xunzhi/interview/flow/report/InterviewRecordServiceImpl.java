@@ -72,19 +72,20 @@ public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMappe
 
         InterviewRecordSaveReqDTO safeRequest = requestParam == null ? new InterviewRecordSaveReqDTO() : requestParam;
         InterviewSession session = interviewSessionOwnershipService.requireOwnedSession(sessionId, userId);
-
-        Integer totalScore = resolveInterviewScore(sessionId, safeRequest);
-        String suggestions = resolveInterviewSuggestions(sessionId, safeRequest);
-        Integer resumeScore = interviewQuestionCacheService.getSessionResumeScore(sessionId);
-        Map<String, String> interviewQuestions = interviewQuestionCacheService.getSessionInterviewQuestions(sessionId);
-        Integer questionCount = interviewQuestions == null ? 0 : interviewQuestions.size();
-        String interviewDirection = resolveInterviewDirection(sessionId, safeRequest, session);
+        InterviewQuestion question = interviewQuestionService.getBySessionId(sessionId);
 
         LambdaQueryWrapper<InterviewRecordDO> queryWrapper = Wrappers.lambdaQuery(InterviewRecordDO.class)
                 .eq(InterviewRecordDO::getUserId, userId)
                 .eq(InterviewRecordDO::getSessionId, sessionId)
                 .eq(InterviewRecordDO::getDelFlag, 0);
         InterviewRecordDO record = baseMapper.selectOne(queryWrapper);
+
+        // 分数采用“多级回补”：请求值 > 缓存 > 既有记录 > turns推导 > 兜底，避免缓存丢失把历史分数覆盖为0。
+        Integer totalScore = resolveInterviewScore(sessionId, safeRequest, record);
+        String suggestions = resolveInterviewSuggestions(sessionId, safeRequest, question);
+        Integer resumeScore = resolveResumeScore(sessionId, question);
+        Integer questionCount = resolveQuestionCount(sessionId, question);
+        String interviewDirection = resolveInterviewDirection(sessionId, safeRequest, session, question);
 
         Date now = new Date();
         if (record == null) {
@@ -121,7 +122,10 @@ public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMappe
             record.setInterviewDirection(interviewDirection);
         }
         record.setStartTime(startTime);
-        record.setEndTime(now);
+        // 只在会话已结束时写 endTime，避免中间态记录被误标记为“已结束”。
+        if (InterviewSessionStatus.FINISHED.name().equalsIgnoreCase(status)) {
+            record.setEndTime(now);
+        }
         record.setDurationSeconds(durationSeconds);
         record.setSessionSnapshotJson(snapshotJson);
         record.setUpdateTime(now);
@@ -230,6 +234,7 @@ public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMappe
         validateUserId(userId);
         RLock finalizeLock = null;
         try {
+            // finalize 锁保证同一 session 同时只有一个收口流程在跑，避免 finish/save 并发互相覆盖。
             finalizeLock = interviewFinalizeLockService.acquire(sessionId);
             if (finalizeLock == null) {
                 Metrics.counter("finalize_lock_contention_total").increment();
@@ -238,20 +243,15 @@ public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMappe
             for (int attempt = 1; attempt <= MAX_FINALIZE_RETRIES; attempt++) {
                 try {
                     InterviewSession session = interviewSessionOwnershipService.requireOwnedSession(sessionId, userId);
-                    InterviewRecordDO existingRecord = findRecordBySessionAndUser(sessionId, userId);
                     boolean alreadyFinished = session != null
                             && InterviewSessionStatus.FINISHED.name().equalsIgnoreCase(session.getStatus());
-                    if (alreadyFinished && existingRecord != null) {
-                        log.info("Finalize skipped because session already finished and record exists, sessionId={}, userId={}",
-                                sessionId, userId);
-                        return;
-                    }
 
+                    // 先保存一次快照；若会话尚未结束，再 finish 后二次保存，确保最终状态和报告字段一致。
                     saveInterviewRecord(sessionId, userId, new InterviewRecordSaveReqDTO());
                     if (!alreadyFinished) {
                         interviewSessionService.finishSession(sessionId, userId);
+                        saveInterviewRecord(sessionId, userId, new InterviewRecordSaveReqDTO());
                     }
-                    saveInterviewRecord(sessionId, userId, new InterviewRecordSaveReqDTO());
                     log.info("Saved interview record from redis, sessionId={}, userId={}, attempt={}",
                             sessionId, userId, attempt);
                     return;
@@ -279,27 +279,174 @@ public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMappe
         }
     }
 
-    private InterviewRecordDO findRecordBySessionAndUser(String sessionId, Long userId) {
-        LambdaQueryWrapper<InterviewRecordDO> queryWrapper = Wrappers.lambdaQuery(InterviewRecordDO.class)
-                .eq(InterviewRecordDO::getUserId, userId)
-                .eq(InterviewRecordDO::getSessionId, sessionId)
-                .eq(InterviewRecordDO::getDelFlag, 0);
-        return baseMapper.selectOne(queryWrapper);
-    }
-
-    private Integer resolveInterviewScore(String sessionId, InterviewRecordSaveReqDTO requestParam) {
+    private Integer resolveInterviewScore(
+            String sessionId,
+            InterviewRecordSaveReqDTO requestParam,
+            InterviewRecordDO existingRecord) {
         if (requestParam.getInterviewScore() != null) {
             return requestParam.getInterviewScore();
         }
         Integer score = interviewQuestionCacheService.getSessionTotalScore(sessionId);
+        if (score != null && score > 0) {
+            return score;
+        }
+        if (existingRecord != null && existingRecord.getInterviewScore() != null) {
+            return existingRecord.getInterviewScore();
+        }
+        Integer derivedScore = deriveScoreFromTurns(sessionId);
+        if (derivedScore != null) {
+            return derivedScore;
+        }
         return score != null ? score : 0;
     }
 
-    private String resolveInterviewSuggestions(String sessionId, InterviewRecordSaveReqDTO requestParam) {
+    private Integer deriveScoreFromTurns(String sessionId) {
+        List<InterviewTurnLog> turns = interviewQuestionCacheService.getInterviewTurns(sessionId);
+        if (turns == null || turns.isEmpty()) {
+            return null;
+        }
+        int sum = 0;
+        int count = 0;
+        for (InterviewTurnLog turn : turns) {
+            if (turn == null || turn.getScore() == null || Boolean.TRUE.equals(turn.getIsFollowUp())) {
+                continue;
+            }
+            int score = clampScore(turn.getScore());
+            sum += score;
+            count++;
+        }
+        if (count <= 0) {
+            return null;
+        }
+        return clampScore((int) Math.round((double) sum / count));
+    }
+
+    private Integer resolveResumeScore(String sessionId, InterviewQuestion question) {
+        Integer resumeScore = interviewQuestionCacheService.getSessionResumeScore(sessionId);
+        if (resumeScore != null) {
+            return resumeScore;
+        }
+        if (question != null && question.getResumeScore() != null) {
+            return question.getResumeScore();
+        }
+        return null;
+    }
+
+    private Integer resolveQuestionCount(String sessionId, InterviewQuestion question) {
+        Map<String, String> interviewQuestions = interviewQuestionCacheService.getSessionInterviewQuestions(sessionId);
+        if (interviewQuestions != null && !interviewQuestions.isEmpty()) {
+            return interviewQuestions.size();
+        }
+        Map<String, String> questionsFromDb = resolveQuestionsMapFromQuestion(question);
+        return questionsFromDb == null ? 0 : questionsFromDb.size();
+    }
+
+    private String resolveInterviewSuggestions(
+            String sessionId,
+            InterviewRecordSaveReqDTO requestParam,
+            InterviewQuestion question) {
         if (StrUtil.isNotBlank(requestParam.getInterviewSuggestions())) {
             return requestParam.getInterviewSuggestions();
         }
         Map<String, String> suggestionsMap = interviewQuestionCacheService.getSessionInterviewSuggestions(sessionId);
+        if ((suggestionsMap == null || suggestionsMap.isEmpty()) && question != null) {
+            suggestionsMap = resolveSuggestionsMapFromQuestion(question);
+        }
+        if (suggestionsMap == null || suggestionsMap.isEmpty()) {
+            return null;
+        }
+        return sortAndJoinValues(suggestionsMap);
+    }
+
+    private String resolveInterviewDirection(
+            String sessionId,
+            InterviewRecordSaveReqDTO requestParam,
+            InterviewSession session,
+            InterviewQuestion question) {
+        // 方向字段按“请求 > 缓存 > session.interviewType > question.interviewType”回补，优先使用最新语义。
+        if (requestParam != null && StrUtil.isNotBlank(requestParam.getInterviewDirection())) {
+            return requestParam.getInterviewDirection().trim();
+        }
+
+        String directionFromCache = interviewQuestionCacheService.getSessionInterviewDirection(sessionId);
+        if (StrUtil.isNotBlank(directionFromCache)) {
+            return directionFromCache.trim();
+        }
+
+        if (session != null && StrUtil.isNotBlank(session.getInterviewType())) {
+            return session.getInterviewType().trim();
+        }
+        if (question != null && StrUtil.isNotBlank(question.getInterviewType())) {
+            return question.getInterviewType().trim();
+        }
+        return null;
+    }
+
+    private Map<String, String> resolveSuggestionsMapFromQuestion(InterviewQuestion question) {
+        if (question == null) {
+            return Collections.emptyMap();
+        }
+        Map<String, String> fromJson = parseIndexedMap(question.getSuggestionsJson());
+        if (!fromJson.isEmpty()) {
+            return fromJson;
+        }
+        return toIndexedMap(question.getSuggestions());
+    }
+
+    private Map<String, String> resolveQuestionsMapFromQuestion(InterviewQuestion question) {
+        if (question == null) {
+            return Collections.emptyMap();
+        }
+        Map<String, String> fromJson = parseIndexedMap(question.getQuestionsJson());
+        if (!fromJson.isEmpty()) {
+            return fromJson;
+        }
+        return toIndexedMap(question.getQuestions());
+    }
+
+    private Map<String, String> parseIndexedMap(String json) {
+        if (StrUtil.isBlank(json)) {
+            return Collections.emptyMap();
+        }
+        try {
+            Map<String, Object> parsed = JSON.parseObject(json, new TypeReference<LinkedHashMap<String, Object>>() {
+            });
+            if (parsed == null || parsed.isEmpty()) {
+                return Collections.emptyMap();
+            }
+            Map<String, String> result = new LinkedHashMap<>();
+            parsed.forEach((key, value) -> {
+                if (StrUtil.isBlank(key) || value == null) {
+                    return;
+                }
+                String text = String.valueOf(value).trim();
+                if (StrUtil.isNotBlank(text)) {
+                    result.put(key.trim(), text);
+                }
+            });
+            return result;
+        } catch (Exception ex) {
+            log.warn("Failed to parse indexed map json", ex);
+            return Collections.emptyMap();
+        }
+    }
+
+    private Map<String, String> toIndexedMap(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<String, String> result = new LinkedHashMap<>();
+        for (int i = 0; i < values.size(); i++) {
+            String value = values.get(i);
+            if (StrUtil.isBlank(value)) {
+                continue;
+            }
+            result.put(String.valueOf(i + 1), value.trim());
+        }
+        return result;
+    }
+
+    private String sortAndJoinValues(Map<String, String> suggestionsMap) {
         if (suggestionsMap == null || suggestionsMap.isEmpty()) {
             return null;
         }
@@ -313,29 +460,6 @@ public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMappe
                 })
                 .map(Map.Entry::getValue)
                 .collect(Collectors.joining("; "));
-    }
-
-    private String resolveInterviewDirection(
-            String sessionId,
-            InterviewRecordSaveReqDTO requestParam,
-            InterviewSession session) {
-        if (requestParam != null && StrUtil.isNotBlank(requestParam.getInterviewDirection())) {
-            return requestParam.getInterviewDirection().trim();
-        }
-
-        String directionFromCache = interviewQuestionCacheService.getSessionInterviewDirection(sessionId);
-        if (StrUtil.isNotBlank(directionFromCache)) {
-            return directionFromCache.trim();
-        }
-
-        if (session != null && StrUtil.isNotBlank(session.getInterviewType())) {
-            return session.getInterviewType().trim();
-        }
-        InterviewQuestion question = interviewQuestionService.getBySessionId(sessionId);
-        if (question != null && StrUtil.isNotBlank(question.getInterviewType())) {
-            return question.getInterviewType().trim();
-        }
-        return null;
     }
 
     private String resolveInterviewStatus(String sessionStatus, Integer totalScore) {
@@ -728,7 +852,7 @@ public class InterviewRecordServiceImpl extends ServiceImpl<InterviewRecordMappe
         return switch (dimensionKey) {
             case "resume_score" -> "简历匹配度";
             case "interview_performance" -> "答题表现";
-            case "demeanor_evaluation" -> "Demeanor expression";
+            case "demeanor_evaluation" -> "神态表达";
             case "professional_skills" -> "专业能力呈现";
             case "potential_index" -> "综合潜力";
             default -> null;

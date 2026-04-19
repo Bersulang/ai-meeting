@@ -1,7 +1,5 @@
 package com.hewei.hzyjy.xunzhi.agent.application;
 
-import lombok.Data;
-
 import java.util.Arrays;
 import java.util.List;
 

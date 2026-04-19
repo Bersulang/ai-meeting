@@ -137,14 +137,7 @@ public class InterviewQuestionServiceImpl implements InterviewQuestionService {
             Integer responseTime,
             Integer tokenCount) {
         try {
-            InterviewQuestion question = new InterviewQuestion();
-            question.setSessionId(reqDTO.getSessionId());
-            question.setUserName(reqDTO.getUserName());
-            question.setAgentId(reqDTO.getAgentId());
-            question.setResumeFileUrl(reqDTO.getResumeFileUrl());
-            question.setResponseTime(responseTime);
-            question.setTokenCount(tokenCount);
-            question.setRawResponseData(aiResponseData);
+            InterviewQuestion question = buildQuestionForUpsert(reqDTO, responseTime, tokenCount, aiResponseData);
 
             Map<String, Object> payload = parseStructuredPayload(aiResponseData);
             List<String> questions = toStringList(payload.get("questions"));
@@ -152,28 +145,31 @@ public class InterviewQuestionServiceImpl implements InterviewQuestionService {
             Integer resumeScore = toInteger(firstNonNull(payload.get("resumeScore"), payload.get("score")));
             String interviewType = resolveInterviewType(payload);
 
-            setQuestions(question, questions);
-            setSuggestions(question, suggestions);
-            if (resumeScore != null) {
-                question.setResumeScore(resumeScore);
-            }
-            if (StrUtil.isNotBlank(interviewType)) {
-                question.setInterviewType(interviewType.trim());
+            if (hasStructuredExtraction(questions, suggestions, resumeScore, interviewType)) {
+                setQuestions(question, questions);
+                setSuggestions(question, suggestions);
+                if (resumeScore != null) {
+                    question.setResumeScore(resumeScore);
+                }
+                if (StrUtil.isNotBlank(interviewType)) {
+                    question.setInterviewType(interviewType.trim());
+                }
+                question.setErrorMessage(null);
+            } else {
+                String errorMessage = resolveErrorMessage(payload, aiResponseData);
+                if (StrUtil.isNotBlank(errorMessage)) {
+                    question.setErrorMessage(errorMessage);
+                }
             }
             return saveInterviewQuestion(question);
         } catch (Exception e) {
             log.error("Create interview question from AI response failed, sessionId={}, error={}",
-                    reqDTO.getSessionId(), e.getMessage(), e);
-            InterviewQuestion errorQuestion = new InterviewQuestion();
-            errorQuestion.setSessionId(reqDTO.getSessionId());
-            errorQuestion.setUserName(reqDTO.getUserName());
-            errorQuestion.setAgentId(reqDTO.getAgentId());
-            errorQuestion.setResumeFileUrl(reqDTO.getResumeFileUrl());
-            errorQuestion.setResponseTime(responseTime);
-            errorQuestion.setTokenCount(tokenCount);
-            errorQuestion.setRawResponseData(aiResponseData);
-            errorQuestion.setErrorMessage(e.getMessage());
-            return saveInterviewQuestion(errorQuestion);
+                    reqDTO == null ? null : reqDTO.getSessionId(), e.getMessage(), e);
+            InterviewQuestion fallbackQuestion = buildQuestionForUpsert(reqDTO, responseTime, tokenCount, aiResponseData);
+            if (StrUtil.isNotBlank(e.getMessage())) {
+                fallbackQuestion.setErrorMessage(e.getMessage());
+            }
+            return saveInterviewQuestion(fallbackQuestion);
         }
     }
 
@@ -392,6 +388,76 @@ public class InterviewQuestionServiceImpl implements InterviewQuestionService {
             }
         }
         return null;
+    }
+
+    private InterviewQuestion buildQuestionForUpsert(
+            InterviewQuestionReqDTO reqDTO,
+            Integer responseTime,
+            Integer tokenCount,
+            String aiResponseData) {
+        String sessionId = reqDTO == null ? null : reqDTO.getSessionId();
+        InterviewQuestion question = StrUtil.isNotBlank(sessionId) ? getBySessionId(sessionId) : null;
+        if (question == null) {
+            question = new InterviewQuestion();
+            question.setSessionId(sessionId);
+            question.setDelFlag(0);
+        }
+
+        if (reqDTO != null) {
+            if (StrUtil.isNotBlank(reqDTO.getUserName())) {
+                question.setUserName(reqDTO.getUserName());
+            }
+            if (reqDTO.getAgentId() != null) {
+                question.setAgentId(reqDTO.getAgentId());
+            }
+            if (StrUtil.isNotBlank(reqDTO.getResumeFileUrl())) {
+                question.setResumeFileUrl(reqDTO.getResumeFileUrl());
+            }
+        }
+        question.setResponseTime(responseTime);
+        question.setTokenCount(tokenCount);
+        if (StrUtil.isNotBlank(aiResponseData)) {
+            question.setRawResponseData(aiResponseData);
+        }
+        return question;
+    }
+
+    private boolean hasStructuredExtraction(
+            List<String> questions,
+            List<String> suggestions,
+            Integer resumeScore,
+            String interviewType) {
+        return (questions != null && !questions.isEmpty())
+                || (suggestions != null && !suggestions.isEmpty())
+                || resumeScore != null
+                || StrUtil.isNotBlank(interviewType);
+    }
+
+    private String resolveErrorMessage(Map<String, Object> payload, String aiResponseData) {
+        String fromPayload = asNonBlankString(firstNonNull(
+                payload == null ? null : payload.get("error"),
+                payload == null ? null : payload.get("message"),
+                payload == null ? null : payload.get("msg")
+        ));
+        if (StrUtil.isNotBlank(fromPayload)) {
+            return fromPayload;
+        }
+        if (StrUtil.isBlank(aiResponseData)) {
+            return null;
+        }
+        String normalized = aiResponseData.trim();
+        if (normalized.length() > 500) {
+            return null;
+        }
+        return normalized;
+    }
+
+    private String asNonBlankString(Object value) {
+        if (value == null) {
+            return null;
+        }
+        String text = String.valueOf(value).trim();
+        return StrUtil.isBlank(text) ? null : text;
     }
 
     private void setQuestions(InterviewQuestion question, List<String> questions) {
