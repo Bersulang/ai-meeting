@@ -11,6 +11,7 @@ import com.hewei.hzyjy.xunzhi.interview.api.io.resp.InterviewQuestionRespDTO;
 import com.hewei.hzyjy.xunzhi.interview.dao.entity.InterviewQuestion;
 import com.hewei.hzyjy.xunzhi.interview.dao.repository.InterviewQuestionRepository;
 import com.hewei.hzyjy.xunzhi.interview.service.InterviewQuestionService;
+import com.hewei.hzyjy.xunzhi.interview.shared.InterviewJsonValueNormalizer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
@@ -228,7 +229,8 @@ public class InterviewQuestionServiceImpl implements InterviewQuestionService {
                 return candidate;
             }
             if (parsed instanceof JSONObject jsonObject) {
-                return jsonObject.toJavaObject(Map.class);
+                Map<String, Object> normalized = InterviewJsonValueNormalizer.asMap(jsonObject);
+                return normalized == null ? Collections.emptyMap() : normalized;
             }
         } catch (Exception ignored) {
             // Fallback to empty map.
@@ -241,10 +243,10 @@ public class InterviewQuestionServiceImpl implements InterviewQuestionService {
             return null;
         }
         if (value instanceof JSONObject jsonObject) {
-            return findStructuredCandidate(jsonObject.toJavaObject(Map.class));
+            return findStructuredCandidate(InterviewJsonValueNormalizer.asMap(jsonObject));
         }
         if (value instanceof JSONArray jsonArray) {
-            return findStructuredCandidate(jsonArray.toJavaObject(List.class));
+            return findStructuredCandidate(InterviewJsonValueNormalizer.asList(jsonArray));
         }
         if (value instanceof Map<?, ?> rawMap) {
             @SuppressWarnings("unchecked")
@@ -307,8 +309,12 @@ public class InterviewQuestionServiceImpl implements InterviewQuestionService {
                     .collect(Collectors.toList());
         }
         if (value instanceof JSONArray jsonArray) {
-            return jsonArray.toJavaList(String.class).stream()
-                    .map(item -> item == null ? null : item.trim())
+            List<Object> normalizedList = InterviewJsonValueNormalizer.asList(jsonArray);
+            if (normalizedList == null) {
+                return Collections.emptyList();
+            }
+            return normalizedList.stream()
+                    .map(item -> item == null ? null : String.valueOf(item).trim())
                     .filter(StrUtil::isNotBlank)
                     .collect(Collectors.toList());
         }
@@ -318,9 +324,12 @@ public class InterviewQuestionServiceImpl implements InterviewQuestionService {
         }
         if (raw.startsWith("[") && raw.endsWith("]")) {
             try {
-                JSONArray jsonArray = JSON.parseArray(raw);
-                return jsonArray.toJavaList(String.class).stream()
-                        .map(item -> item == null ? null : item.trim())
+                List<Object> normalizedList = InterviewJsonValueNormalizer.asList(JSON.parse(raw));
+                if (normalizedList == null) {
+                    return Collections.emptyList();
+                }
+                return normalizedList.stream()
+                        .map(item -> item == null ? null : String.valueOf(item).trim())
                         .filter(StrUtil::isNotBlank)
                         .collect(Collectors.toList());
             } catch (Exception ignored) {
