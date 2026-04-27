@@ -389,7 +389,27 @@ public class XunfeiAudioService {
             return;
         }
 
-        sentencePool.clear();
+        if (bg == null || ed == null) {
+            upsertAstSegment(sentencePool, sn, text, finalized);
+            return;
+        }
+
+        SegmentState sameRange = findExactRangeState(sentencePool, bg, ed);
+        if (sameRange != null && isPunctuationOnly(text) && StrUtil.isNotBlank(sameRange.text)) {
+            sameRange.text = appendTrailingPunctuation(sameRange.text, text);
+            sameRange.finalized = sameRange.finalized || finalized;
+            sameRange.updatedAt = System.currentTimeMillis();
+            return;
+        }
+
+        SegmentState reusable = findReusableRangeState(sentencePool, bg, ed, text);
+        if (reusable != null) {
+            updateSegmentState(reusable, text, finalized, bg, ed);
+            removeCoveredSiblingRangeStates(sentencePool, reusable.segId, bg, ed, text);
+            return;
+        }
+
+        removeCoveredSiblingRangeStates(sentencePool, null, bg, ed, text);
         upsertAstSegment(sentencePool, sn, text, finalized);
         SegmentState state = sentencePool.get(sn);
         if (state != null) {
@@ -413,7 +433,49 @@ public class XunfeiAudioService {
         return null;
     }
 
-    private void removeOverlappingRangeStates(TreeMap<Integer, SegmentState> sentencePool, Integer bg, Integer ed) {
+    private SegmentState findReusableRangeState(TreeMap<Integer, SegmentState> sentencePool,
+                                                Integer bg,
+                                                Integer ed,
+                                                String text) {
+        if (bg == null || ed == null || sentencePool == null || sentencePool.isEmpty() || StrUtil.isBlank(text)) {
+            return null;
+        }
+
+        SegmentState best = null;
+        double bestScore = -1D;
+        for (SegmentState state : sentencePool.values()) {
+            if (state == null || state.bg == null || state.ed == null) {
+                continue;
+            }
+            if (!isRangeOverlapping(bg, ed, state.bg, state.ed)) {
+                continue;
+            }
+            if (state.bg.equals(bg) && state.ed.equals(ed)) {
+                return state;
+            }
+
+            double overlapRatio = calculateOverlapRatio(bg, ed, state.bg, state.ed);
+            if (overlapRatio < 0.6D || !isLikelySameSegmentEvolution(state.text, text)) {
+                continue;
+            }
+
+            double score = overlapRatio;
+            if (containsComparableText(text, state.text)) {
+                score += 1D;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                best = state;
+            }
+        }
+        return best;
+    }
+
+    private void removeCoveredSiblingRangeStates(TreeMap<Integer, SegmentState> sentencePool,
+                                                 Integer retainedSegId,
+                                                 Integer bg,
+                                                 Integer ed,
+                                                 String text) {
         if (bg == null || ed == null || sentencePool == null || sentencePool.isEmpty()) {
             return;
         }
@@ -424,7 +486,11 @@ public class XunfeiAudioService {
             if (state == null || state.bg == null || state.ed == null) {
                 continue;
             }
-            if (isRangeOverlapping(bg, ed, state.bg, state.ed)) {
+            if (retainedSegId != null && retainedSegId.equals(entry.getKey())) {
+                continue;
+            }
+            if (isRangeFullyCoveredBy(bg, ed, state.bg, state.ed)
+                    && isLikelySameSegmentEvolution(state.text, text)) {
                 iterator.remove();
             }
         }
@@ -432,6 +498,22 @@ public class XunfeiAudioService {
 
     private boolean isRangeOverlapping(int bg1, int ed1, int bg2, int ed2) {
         return bg1 <= ed2 && bg2 <= ed1;
+    }
+
+    private boolean isRangeFullyCoveredBy(int outerBg, int outerEd, int innerBg, int innerEd) {
+        return outerBg <= innerBg && outerEd >= innerEd;
+    }
+
+    private double calculateOverlapRatio(int bg1, int ed1, int bg2, int ed2) {
+        int overlapStart = Math.max(bg1, bg2);
+        int overlapEnd = Math.min(ed1, ed2);
+        int overlap = overlapEnd - overlapStart;
+        if (overlap <= 0) {
+            return 0D;
+        }
+        int span1 = Math.max(1, ed1 - bg1);
+        int span2 = Math.max(1, ed2 - bg2);
+        return (double) overlap / Math.min(span1, span2);
     }
 
     private boolean isPunctuationOnly(String text) {
@@ -475,6 +557,70 @@ public class XunfeiAudioService {
             end--;
         }
         return text.substring(0, end);
+    }
+
+    private boolean isLikelySameSegmentEvolution(String existingText, String incomingText) {
+        String existingComparable = toComparableText(existingText);
+        String incomingComparable = toComparableText(incomingText);
+        if (existingComparable.isEmpty() || incomingComparable.isEmpty()) {
+            return false;
+        }
+        if (existingComparable.equals(incomingComparable)) {
+            return true;
+        }
+        if (incomingComparable.contains(existingComparable) || existingComparable.contains(incomingComparable)) {
+            return true;
+        }
+        int commonPrefix = commonPrefixLength(existingComparable, incomingComparable);
+        int minLength = Math.min(existingComparable.length(), incomingComparable.length());
+        return minLength > 0 && ((double) commonPrefix / minLength) >= 0.8D;
+    }
+
+    private boolean containsComparableText(String source, String candidate) {
+        String sourceComparable = toComparableText(source);
+        String candidateComparable = toComparableText(candidate);
+        if (sourceComparable.isEmpty() || candidateComparable.isEmpty()) {
+            return false;
+        }
+        return sourceComparable.contains(candidateComparable);
+    }
+
+    private String toComparableText(String text) {
+        if (text == null) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder(text.length());
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            if (Character.isLetterOrDigit(ch) || Character.UnicodeScript.of(ch) == Character.UnicodeScript.HAN) {
+                builder.append(ch);
+            }
+        }
+        return builder.toString();
+    }
+
+    private int commonPrefixLength(String left, String right) {
+        int limit = Math.min(left.length(), right.length());
+        int index = 0;
+        while (index < limit && left.charAt(index) == right.charAt(index)) {
+            index++;
+        }
+        return index;
+    }
+
+    private void updateSegmentState(SegmentState state,
+                                    String text,
+                                    boolean finalized,
+                                    Integer bg,
+                                    Integer ed) {
+        if (state == null) {
+            return;
+        }
+        state.text = text;
+        state.finalized = state.finalized || finalized;
+        state.bg = bg;
+        state.ed = ed;
+        state.updatedAt = System.currentTimeMillis();
     }
 
     private void upsertAstSegment(TreeMap<Integer, SegmentState> sentencePool,

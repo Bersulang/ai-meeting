@@ -72,6 +72,37 @@ class XunfeiAudioServiceTest {
     }
 
     @Test
+    void applyAstSegmentWithoutPgs_ShouldPreserveEarlierSegment_WhenOnlySlightTailOverlapExists() throws Exception {
+        TreeMap<Integer, Object> sentencePool = new TreeMap<>();
+
+        invokeVoid("applyAstSegmentWithoutPgs",
+                new Class[]{TreeMap.class, int.class, Integer.class, Integer.class, String.class, boolean.class},
+                sentencePool, 10, 10000, 14900, "数据结构，主要用来快速、准确地完成", false);
+        invokeVoid("applyAstSegmentWithoutPgs",
+                new Class[]{TreeMap.class, int.class, Integer.class, Integer.class, String.class, boolean.class},
+                sentencePool, 29, 14880, 16980, "用户商品能不能命中某个优惠", false);
+
+        String merged = invoke("buildFinalResult", new Class[]{java.util.Map.class}, sentencePool);
+        assertEquals("数据结构，主要用来快速、准确地完成用户商品能不能命中某个优惠", merged);
+    }
+
+    @Test
+    void applyAstSegmentWithoutPgs_ShouldReuseExistingSegment_WhenIncomingPacketIsSameSentenceEvolution() throws Exception {
+        TreeMap<Integer, Object> sentencePool = new TreeMap<>();
+
+        invokeVoid("applyAstSegmentWithoutPgs",
+                new Class[]{TreeMap.class, int.class, Integer.class, Integer.class, String.class, boolean.class},
+                sentencePool, 29, 14880, 17330, "能不能够命中某个优惠活动", false);
+        invokeVoid("applyAstSegmentWithoutPgs",
+                new Class[]{TreeMap.class, int.class, Integer.class, Integer.class, String.class, boolean.class},
+                sentencePool, 30, 14890, 17770, "能不能够命中某个优惠活动的", false);
+
+        String merged = invoke("buildFinalResult", new Class[]{java.util.Map.class}, sentencePool);
+        assertEquals("能不能够命中某个优惠活动的", merged);
+        assertEquals(1, sentencePool.size());
+    }
+
+    @Test
     void extractAstText_ShouldUseOnlyFirstRtAndTopCandidateWord() throws Exception {
         JSONObject root = JSONObject.parseObject("""
                 {
