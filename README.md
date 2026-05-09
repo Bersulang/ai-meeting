@@ -153,45 +153,37 @@
 
 ### 简历与面试
 
-面试中心：
+首页登录：
 
-![面试中心](https://oss.javaguide.cn/xingqiu/pratical-project/interview-guide/page-interview-hub.png)
+![首页登录](docs/assets/首页登陆.png)
 
-Skill 出题 + JD 解析：
+上传简历：
 
-![Skill 出题 + JD 解析](https://oss.javaguide.cn/xingqiu/pratical-project/interview-guide/page-skill-jd-parse.png)
+![上传简历](docs/assets/上传简历.png)
 
-简历库：
+在线解析并出题：
 
-![简历库](https://oss.javaguide.cn/xingqiu/pratical-project/interview-guide/page-resume-history.png)
+![在线解析并出题](docs/assets/在线解析并出题.png)
 
-简历上传分析：
+面试入口：
 
-![简历上传分析](https://oss.javaguide.cn/xingqiu/pratical-project/interview-guide/page-resume-upload-analysis.png)
+![面试入口](docs/assets/面试入口.png)
 
-简历分析详情：
+提问环节：
 
-![简历分析详情](https://oss.javaguide.cn/xingqiu/pratical-project/interview-guide/page-resume-analysis-detail.png)
+![提问环节](docs/assets/提问环节.png)
 
-面试记录：
+追问环节：
 
-![面试记录](https://oss.javaguide.cn/xingqiu/pratical-project/interview-guide/page-interview-history.png)
+![追问环节](docs/assets/追问环节.png)
 
-面试详情：
+结果复盘：
 
-![面试详情](https://oss.javaguide.cn/xingqiu/pratical-project/interview-guide/page-interview-detail.png)
+![结果复盘](docs/assets/结果复盘.png)
 
-模拟面试：
+面试结果分析：
 
-![模拟面试](https://oss.javaguide.cn/xingqiu/pratical-project/interview-guide/page-mock-interview.png)
-
-面试安排
-
-![面试安排](https://oss.javaguide.cn/xingqiu/pratical-project/interview-guide/page-interview-schedule-list.png)
-
-多模型切换 + 语音服务设置：
-
-![管理聊天模型、向量模型和模块配置](https://oss.javaguide.cn/xingqiu/pratical-project/interview-guide/llm-settings.png)
+![面试结果分析](docs/assets/面试结果分析.png)
 
 
 ## 开源协作
