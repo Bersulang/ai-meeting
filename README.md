@@ -12,7 +12,7 @@
 
 </div>
 
-![项目概览](docs/assets/repo-showcase.svg)
+![项目概览](docs/assets/首页登陆.png)
 
 这是一个基于 Spring Boot 3 + Java 17 + Spring AI + MySQL + MongoDB + Redis 构建的 AI 智能助手后端项目，聚焦 AI 对话、智能体会话、模拟面试、实时语音转写和长文本语音合成等场景。项目采用模块化单体架构，支持 HTTP、SSE、WebSocket 多链路交互，兼顾业务完整性、工程规范性和开箱即用性。
 
