@@ -73,25 +73,11 @@
 
 如果你确实需要更系统的辅导，更详细的文档解释，可以前往抖音/小红书搜索程序员牛肉，在我的店铺中购买对应飞书文档：[程序员牛肉](https://www.douyin.com/user/MS4wLjABAAAAG4zpgPNSg8tiB7XtU3mvebi8lET_jPtYcii6rUB5REKBlOnTK74-vRG6c54OcPTL?from_tab_name=main)。
 
-## 技术栈
-
-# 文档展示
+## 文档展示
 
 ![文档首页截图](docs/assets/文档首页截图.png)
 ![文档部分截图](docs/assets/文档截图.png)
 ![文档部分截图](docs/assets/文档截图2.png)
-
-
-## 功能入口
-
-- AI 对话：`/api/xunzhi/v1/ai/**`
-- 智能体会话：`/api/xunzhi/v1/agents/**`
-- 面试会话与记录：`/api/xunzhi/v1/interview/**`
-- 长文本语音合成：`/api/xunzhi/v1/xunfei/tts/**`
-- 实时语音转写：`/api/xunzhi/v1/xunfei/audio-to-text/{userId}`
-- WebSocket 管理接口：`/api/xunzhi/v1/websocket/**`
-- 题库采集与审核：`/api/xunzhi/v1/collection/**`
-- 健康检查：`/actuator/health`
 
 ## 技术栈
 
