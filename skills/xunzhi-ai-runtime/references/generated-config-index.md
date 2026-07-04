@@ -6,7 +6,7 @@
 
 | 键 | 值 |
 | --- | --- |
-| `spring.ai.openai.api-key` | `${SPRING_AI_OPENAI_API_KEY:sk-xxxxxxxxxxxxx}` |
+| `spring.ai.openai.api-key` | `${SPRING_AI_OPENAI_API_KEY:}` |
 | `spring.ai.openai.base-url` | `${SPRING_AI_OPENAI_BASE_URL:https://api.openai.com}` |
 | `spring.ai.openai.chat.options.model` | `${SPRING_AI_OPENAI_MODEL:gpt-4o-mini}` |
 | `spring.ai.openai.chat.options.temperature` | `${SPRING_AI_OPENAI_TEMPERATURE:0.7}` |
@@ -16,9 +16,9 @@
 
 | 键 | 值 |
 | --- | --- |
-| `xunfei.lat-key.api-key` | `${XUNFEI_API_KEY:e8565c438f59b301616e0498a86ad95d}` |
-| `xunfei.lat-key.api-secret` | `${XUNFEI_API_SECRET:OGZkZGQ5ZDY0Yzc4MTllZWI3ZmU2MDU4}` |
-| `xunfei.lat-key.app-id` | `${XUNFEI_APP_ID:96f3a359}` |
+| `xunfei.lat-key.api-key` | `${XUNFEI_API_KEY:}` |
+| `xunfei.lat-key.api-secret` | `${XUNFEI_API_SECRET:}` |
+| `xunfei.lat-key.app-id` | `${XUNFEI_APP_ID:}` |
 | `xunfei.lat-key.rta-api-key` | `${XUNFEI_RTA_API_KEY:}` |
 
 ## xunzhi-agent.agent-binding

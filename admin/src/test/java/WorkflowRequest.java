@@ -6,8 +6,8 @@ import java.nio.charset.StandardCharsets;
 public class WorkflowRequest {
 
     public static void main(String[] args) throws Exception {
-        String apiKey = "e8565c438f59b301616e0498a86ad95d";
-        String apiSecret = "OGZkZGQ5ZDY0Yzc4MTllZWI3ZmU2MDU4";
+        String apiKey = System.getenv().getOrDefault("XUNFEI_WORKFLOW_API_KEY", "your-api-key");
+        String apiSecret = System.getenv().getOrDefault("XUNFEI_WORKFLOW_API_SECRET", "your-api-secret");
 
         String urlString = "https://xingchen-api.xf-yun.com/workflow/v1/chat/completions";
         URL url = new URL(urlString);
